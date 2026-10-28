@@ -10,6 +10,7 @@
 - Баланс хранится в ДЕНЬГАХ (balance_sum / earned_sum), а не считается как
   «количество × текущая цена». Смена цены за реферала больше не пересчитывает
   уже заработанные деньги. current_count/history_count остаются как счётчики людей.
+- Если приглашённый вышел из группы — начисление за него снимается (пункт 8).
 """
 from __future__ import annotations
 
@@ -230,15 +231,17 @@ class SafeDatabase(Database):
 
     async def credit_referral_once(self, referrer_id: int, invited_user_id: int, reward: int) -> bool:
         """
-        Атомарно: записывает приглашённого, +1 к счётчику и +reward к балансу реферера
-        (reward — цена на МОМЕНТ начисления). Если этот человек уже засчитан
-        (в т.ч. при двух одновременных событиях от Telegram), ничего не меняет и возвращает False.
+        Атомарно: записывает приглашённого (вместе с начисленной суммой — она нужна,
+        чтобы снять ровно её, если человек выйдет из группы), +1 к счётчику и +reward
+        к балансу реферера (reward — цена на МОМЕНТ начисления). Если этот человек уже
+        засчитан (в т.ч. при двух одновременных событиях от Telegram или повторном
+        вступлении после выхода), ничего не меняет и возвращает False.
         """
         row = await self.execute(
             """
             WITH ins AS (
-                INSERT INTO UserInviteMember (user_id, inveted_user_id)
-                VALUES ($1, $2)
+                INSERT INTO UserInviteMember (user_id, inveted_user_id, reward_sum)
+                VALUES ($1, $2, CAST($3 AS BIGINT))
                 ON CONFLICT (inveted_user_id) DO NOTHING
                 RETURNING user_id
             ), cnt AS (
@@ -257,3 +260,80 @@ class SafeDatabase(Database):
             fetchone=True,
         )
         return row is not None
+
+    # ======================================================
+    # Выход приглашённого из группы (пункт 8)
+    # ======================================================
+    async def ensure_referral_reversal_columns(self) -> None:
+        """
+        Миграция: в UserInviteMember запоминаем, сколько денег начислено за человека
+        (reward_sum) и когда начисление снято (reversed_at). Старым записям reward_sum
+        заполняется по текущей цене — так же, как балансы в ensure_money_columns.
+        """
+        price = _current_price()  # int — безопасно подставлять в DO-блок
+        await self.execute(
+            f"""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'userinvitemember' AND column_name = 'reward_sum'
+                ) THEN
+                    ALTER TABLE UserInviteMember ADD COLUMN reward_sum BIGINT NOT NULL DEFAULT 0;
+                    UPDATE UserInviteMember SET reward_sum = {price};
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'userinvitemember' AND column_name = 'reversed_at'
+                ) THEN
+                    ALTER TABLE UserInviteMember ADD COLUMN reversed_at TIMESTAMP NULL;
+                END IF;
+            END $$;
+            """
+        )
+        logger.info("✅ Снятие начисления при выходе из группы готово (reward_sum / reversed_at).")
+
+    async def reverse_referral_on_leave(self, invited_user_id: int, hold_hours: int, group_id: int):
+        """
+        Атомарно снимает начисление за приглашённого, который вышел из группы:
+        - только если начисление ещё не снято и человек вышел в течение hold_hours
+          после вступления (hold_hours <= 0 — снимать всегда);
+        - у пригласившего: -1 к счётчикам, -reward_sum к балансу и заработку,
+          -1 к «добавил N участников» в этой группе. Ниже нуля ничего не уходит.
+        Запись приглашённого остаётся (с reversed_at), поэтому при повторном
+        вступлении деньги второй раз не начислятся.
+        Возвращает {user_id, reward_sum} или None, если снимать нечего.
+        """
+        return await self.execute(
+            """
+            WITH rev AS (
+                UPDATE UserInviteMember
+                SET reversed_at = NOW()
+                WHERE inveted_user_id = $1
+                  AND reversed_at IS NULL
+                  AND (
+                      CAST($2 AS INT) <= 0
+                      OR invited_at >= NOW() - make_interval(hours => CAST($2 AS INT))
+                  )
+                RETURNING user_id, reward_sum
+            ), ded AS (
+                UPDATE UserInviteCount uic
+                SET current_count = GREATEST(0, uic.current_count - 1),
+                    history_count = GREATEST(0, uic.history_count - 1),
+                    balance_sum   = GREATEST(0, uic.balance_sum - rev.reward_sum),
+                    earned_sum    = GREATEST(0, uic.earned_sum - rev.reward_sum)
+                FROM rev
+                WHERE uic.user_id = rev.user_id
+                RETURNING uic.user_id
+            ), grp AS (
+                UPDATE GroupMembers gm
+                SET add_user_count = GREATEST(0, gm.add_user_count - 1)
+                FROM rev
+                WHERE gm.user_id = rev.user_id AND gm.group_id = CAST($3 AS BIGINT)
+                RETURNING gm.user_id
+            )
+            SELECT user_id, reward_sum FROM rev
+            """,
+            parameters=(invited_user_id, int(hold_hours), group_id),
+            fetchone=True,
+        )

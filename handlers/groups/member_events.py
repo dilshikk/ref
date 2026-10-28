@@ -7,12 +7,16 @@ from aiogram.filters import BaseFilter
 from aiogram.types import Message, ChatMemberUpdated
 from loguru import logger
 
-from data.config import url_yaml, ADMINS
+from data.config import url_yaml, ADMINS, GROUP_ID
 from loader import db, bot
 
 router = Router(name="groups.member_events")
 
 _DEFAULT_ANTIFRAUD_LIMIT = 100
+# Сколько часов после вступления выход из группы отменяет начисление (пункт 8)
+_DEFAULT_REFERRAL_HOLD_HOURS = 72
+
+_LEFT_STATUSES = ("left", "kicked")
 
 
 def _antifraud_limit() -> int:
@@ -22,6 +26,18 @@ def _antifraud_limit() -> int:
     except (TypeError, ValueError):
         return _DEFAULT_ANTIFRAUD_LIMIT
     return value if value > 0 else _DEFAULT_ANTIFRAUD_LIMIT
+
+
+def _referral_hold_hours() -> int:
+    """
+    referral_hold_hours в url.yml: если приглашённый вышел из группы в течение
+    этого времени после вступления, начисление снимается. 0 — снимать всегда.
+    """
+    try:
+        value = int(url_yaml.get("referral_hold_hours", _DEFAULT_REFERRAL_HOLD_HOURS))
+    except (TypeError, ValueError):
+        return _DEFAULT_REFERRAL_HOLD_HOURS
+    return max(0, value)
 
 
 class ChatGroupFilter(BaseFilter):
@@ -94,6 +110,7 @@ async def credit_referral(
     Возвращает True, только если реферал действительно засчитан сейчас."""
     already_invited = await db.select_invited_members(inveted_user_id=new_user_id)
     if already_invited:
+        # Сюда же попадает повторное вступление после выхода: деньги второй раз не начисляются
         logger.debug(f"Реферал {new_user_id} уже засчитан, пропуск.")
         return False
 
@@ -129,11 +146,17 @@ async def credit_referral(
         logger.debug(f"Реферал {new_user_id} уже засчитан (повторное событие), пропуск.")
         return False
 
+    hold_hours = _referral_hold_hours()
+    hold_note = (
+        f"\n\n⚠️ Если друг выйдет из группы в течение {hold_hours} ч., начисление будет снято."
+        if hold_hours > 0
+        else "\n\n⚠️ Если друг выйдет из группы, начисление будет снято."
+    )
     try:
         await bot.send_message(
             referrer_id,
             f"🎉 <b>{new_user_name} вступил по вашей ссылке!</b>\n\n"
-            f"💰 Вам начислено <b>{invited_credit}</b> сум.",
+            f"💰 Вам начислено <b>{invited_credit}</b> сум.{hold_note}",
             parse_mode="HTML",
         )
     except Exception as e:
@@ -141,6 +164,38 @@ async def credit_referral(
 
     logger.info(f"✅ Реферал засчитан: new={new_user_id} → referrer={referrer_id}")
     return True
+
+
+async def reverse_referral_on_leave(user: types.User, group_id: int) -> None:
+    """Пункт 8: приглашённый вышел из группы — снимаем начисление у пригласившего."""
+    # Реферальные ссылки ведут только в GROUP_ID: выход из других групп не учитываем
+    if group_id != GROUP_ID:
+        return
+
+    hold_hours = _referral_hold_hours()
+    try:
+        reversed_row = await db.reverse_referral_on_leave(user.id, hold_hours, group_id)
+    except Exception as e:
+        logger.error(f"Ошибка снятия реферала при выходе [user={user.id}]: {e}")
+        return
+
+    if not reversed_row:
+        # Не был приглашён, уже снято или вышел позже срока удержания
+        return
+
+    referrer_id = int(reversed_row["user_id"])
+    reward = int(reversed_row["reward_sum"] or 0)
+    logger.info(f"↩️ Реферал снят: {user.id} вышел из группы → referrer={referrer_id}, -{reward} сум")
+
+    try:
+        await bot.send_message(
+            referrer_id,
+            f"↩️ <b>{user.full_name}</b> вышел из группы.\n\n"
+            f"💸 Начисление <b>{reward}</b> сум за этого участника снято.",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.warning(f"Не удалось уведомить реферера {referrer_id} о снятии: {e}")
 
 
 @router.chat_member(ChatGroupFilter())
@@ -164,8 +219,13 @@ async def on_user_join(event: types.ChatMemberUpdated) -> None:
     if user.is_bot:
         return
 
+    # Выход из группы (сам или удалён админом) — снимаем начисление
+    if new_status in _LEFT_STATUSES and old_status not in _LEFT_STATUSES:
+        await reverse_referral_on_leave(user, group_id)
+        return
+
     # Только новые вступления
-    if new_status != "member" or old_status not in ("left", "kicked"):
+    if new_status != "member" or old_status not in _LEFT_STATUSES:
         return
 
     # Убеждаемся что пользователь есть в таблице Users
