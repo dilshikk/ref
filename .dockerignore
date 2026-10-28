@@ -4,6 +4,8 @@
 .env.*
 !.env.example
 data/url.yml
+config/
+data/.url.yml.*.tmp
 
 # Git и служебное
 .git

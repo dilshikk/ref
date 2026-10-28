@@ -25,6 +25,8 @@ logs/
 .coverage
 htmlcov/
 data/url.yml
+config/
+data/.url.yml.*.tmp
 
 # OS
 .DS_Store
