@@ -1,6 +1,7 @@
 # /www/wwwroot/uz_ibot/handlers/groups/member_events.py
 import asyncio
 import html
+import time
 from typing import Union
 
 from aiogram import Router, types
@@ -16,8 +17,13 @@ router = Router(name="groups.member_events")
 _DEFAULT_ANTIFRAUD_LIMIT = 100
 # Сколько часов после вступления выход из группы отменяет начисление (пункт 8)
 _DEFAULT_REFERRAL_HOLD_HOURS = 72
+# Об одном и том же подозрительном пригласившем админы узнают не чаще раза в час
+_ANTIFRAUD_ALERT_COOLDOWN = 3600
 
 _LEFT_STATUSES = ("left", "kicked")
+
+# referrer_id → (время последнего уведомления, сколько вступлений отклонено с тех пор)
+_antifraud_alerts: dict[int, tuple[float, int]] = {}
 
 
 def _antifraud_limit() -> int:
@@ -103,6 +109,41 @@ async def _send_welcome_dm(user: types.User, group_id: int) -> None:
             logger.warning(f"Не удалось отправить приветствие для user={user.id}: {e}")
 
 
+async def _antifraud_alert(referrer_id: int, count_last_hour: int, limit: int) -> None:
+    """
+    Раньше админы получали отдельное сообщение на КАЖДОЕ вступление сверх лимита —
+    при накрутке это сотни сообщений. Теперь — одно уведомление в час на пригласившего,
+    с числом отклонённых вступлений с прошлого уведомления.
+    """
+    now = time.monotonic()
+    last_sent, skipped = _antifraud_alerts.get(referrer_id, (0.0, 0))
+    if now - last_sent < _ANTIFRAUD_ALERT_COOLDOWN:
+        _antifraud_alerts[referrer_id] = (last_sent, skipped + 1)
+        return
+    _antifraud_alerts[referrer_id] = (now, 0)
+
+    # Не даём словарю расти бесконечно: старые записи больше не нужны
+    for key, (sent, _) in list(_antifraud_alerts.items()):
+        if now - sent > _ANTIFRAUD_ALERT_COOLDOWN * 2:
+            _antifraud_alerts.pop(key, None)
+
+    skipped_note = f"\n⏸ Отклонено вступлений за прошлый час: <b>{skipped + 1}</b>" if skipped else ""
+    for admin_id in ADMINS:
+        try:
+            await bot.send_message(
+                admin_id,
+                f"🚨 <b>Подозрительная активность!</b>\n\n"
+                f"👤 <a href='tg://user?id={referrer_id}'>{referrer_id}</a>\n"
+                f"👥 Приглашено за час: <b>{count_last_hour}</b> (лимит {limit})\n"
+                f"Новые вступления по его ссылке не оплачиваются, пока активность не снизится."
+                f"{skipped_note}\n\n"
+                f"Следующее уведомление об этом пользователе — не раньше чем через час.",
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.error(f"Не удалось уведомить админа {admin_id}: {e}")
+
+
 async def credit_referral(
     referrer_id: int,
     new_user_id: int,
@@ -124,19 +165,20 @@ async def credit_referral(
     count_last_hour = await db.get_referrals_last_hour(referrer_id)
     if count_last_hour >= limit:
         logger.warning(
-            f"🚨 Антифрод: {referrer_id} пригласил {count_last_hour} за час (лимит {limit})!"
+            f"🚨 Антифрод: {referrer_id} пригласил {count_last_hour} за час (лимит {limit}), "
+            f"вступление {new_user_id} не оплачено"
         )
-        for admin_id in ADMINS:
-            try:
-                await bot.send_message(
-                    admin_id,
-                    f"🚨 <b>Подозрительная активность!</b>\n\n"
-                    f"👤 <a href='tg://user?id={referrer_id}'>{referrer_id}</a>\n"
-                    f"👥 Приглашено за час: <b>{count_last_hour}</b> (лимит {limit})",
-                    parse_mode="HTML",
-                )
-            except Exception as e:
-                logger.error(f"Не удалось уведомить админа {admin_id}: {e}")
+        await _antifraud_alert(referrer_id, count_last_hour, limit)
+        # Пригласившему объясняем, почему денег нет, — иначе он думает, что бот сломан
+        try:
+            await bot.send_message(
+                referrer_id,
+                f"⏸ {html.escape(new_user_name)} вступил по вашей ссылке, но начисление не произведено: "
+                f"превышен лимит приглашений за час ({limit}). Попробуйте позже.",
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.debug(f"Не удалось уведомить реферера {referrer_id} об антифроде: {e}")
         return False
 
     # Цена фиксируется в момент начисления: если админ потом её поменяет,
