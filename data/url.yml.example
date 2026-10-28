@@ -11,3 +11,5 @@ vote_credit: 500
 url: ''
 support: '@affairme'
 antispam_referral_limit: 100
+# Если приглашённый выйдет из группы в течение этого числа часов, начисление снимается (0 — снимать всегда)
+referral_hold_hours: 72

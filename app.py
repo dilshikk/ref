@@ -94,6 +94,8 @@ async def database_connected() -> None:
     await db.ensure_unique_invited_members()
     # Баланс в деньгах: смена цены за реферала не пересчитывает старые балансы
     await db.ensure_money_columns()
+    # Снятие начисления, если приглашённый вышел из группы
+    await db.ensure_referral_reversal_columns()
 
     logger.info("✅ Все таблицы проверены и готовы.")
 
