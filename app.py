@@ -2,7 +2,6 @@
 import asyncio
 
 from aiogram import Dispatcher
-from aiogram.fsm.storage.memory import MemoryStorage
 from loguru import logger
 
 from data.config import ADMINS
@@ -11,6 +10,11 @@ from middlewares.antispam import SmartRateLimiter
 from middlewares.callback_answer import CallbackAutoAnswerMiddleware
 from services.audit_log import audit_log_service
 from services.error_notify import notify_admins_about_error
+from utils.fsm_storage import PostgresStorage
+
+# Состояния форм хранятся в базе: при перезапуске бота незаконченный
+# вывод средств или настройка в админке больше не теряются (раньше — MemoryStorage)
+fsm_storage = PostgresStorage(db)
 
 
 def _is_network_resolution_error(error: Exception) -> bool:
@@ -49,22 +53,15 @@ def setup_middlewares(dispatcher: Dispatcher) -> None:
     # Стикер/фото в форме, где нужен текст, больше не роняет обработчик
     dispatcher.message.middleware(TextInputGuardMiddleware())
 
-    # Прежний ThrottlingMiddleware убран: он дублировал SmartRateLimiter и отвечал
-    # «Слишком много запросов» на быстрые ответы в формах, теряя их.
     dispatcher.message.middleware(action_logger)
     dispatcher.callback_query.middleware(action_logger)
 
 
-def setup_filters(dispatcher: Dispatcher) -> None:
-    """Router-specific filters are declared next to their handlers."""
-    return None
-
-
 async def setup_aiogram(dispatcher: Dispatcher) -> None:
+    # Фильтры объявлены рядом со своими хэндлерами, отдельная настройка не нужна
     logger.info("Configuring aiogram")
     setup_handlers(dispatcher=dispatcher)
     setup_middlewares(dispatcher=dispatcher)
-    setup_filters(dispatcher=dispatcher)
     logger.info("Configured aiogram")
 
 
@@ -87,6 +84,8 @@ async def database_connected() -> None:
     await db.create_table_poll_vote_rewards()
     # Кто кого добавил в группу вручную: один человек засчитывается один раз
     await db.create_table_group_manual_adds()
+    # Состояния форм (переживают перезапуск)
+    await fsm_storage.create_table()
 
     # Миграции
     await db.add_is_blocked_column()
@@ -151,14 +150,15 @@ async def aiogram_on_shutdown_polling(dispatcher: Dispatcher) -> None:
         logger.warning(f"Не удалось записать bot_stop в аудит: {e}")
 
     try:
-        await db.close_pool()
-    except Exception as e:
-        logger.warning(f"Ошибка закрытия пула БД: {e}")
-
-    try:
         await dispatcher.storage.close()
     except Exception as e:
         logger.warning(f"Ошибка закрытия storage: {e}")
+
+    # База закрывается последней: хранилище форм работает через неё
+    try:
+        await db.close_pool()
+    except Exception as e:
+        logger.warning(f"Ошибка закрытия пула БД: {e}")
 
 
 async def send_error_to_admin(error: Exception) -> None:
@@ -175,7 +175,7 @@ async def run_polling() -> None:
     Вынесена отдельно, чтобы send_error_to_admin работал
     в том же event loop, что и bot — сессия ещё открыта.
     """
-    dispatcher = Dispatcher(storage=MemoryStorage())
+    dispatcher = Dispatcher(storage=fsm_storage)
 
     dispatcher.startup.register(aiogram_on_startup_polling)
     dispatcher.shutdown.register(aiogram_on_shutdown_polling)

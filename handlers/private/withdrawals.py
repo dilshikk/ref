@@ -21,6 +21,19 @@ router = private_only(Router(name="private.withdrawals"))
 user_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
 
 
+def _cfg_int(key: str, default: int) -> int:
+    """Число из url.yml. Админка может сохранить значение строкой ("5000"),
+    и тогда сравнение баланса с ним падало с ошибкой — пользователь не получал ответа."""
+    value = url_yaml.get(key)
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        logger.warning(f"url.yml: {key}={value!r} не число, используется {default}")
+        return default
+
+
 def _mask_payment_info(value: str | None) -> str:
     """Карта/телефон для журналов: только последние 4 цифры.
     Полные реквизиты хранятся лишь в заявке на выплату — там они нужны админу."""
@@ -42,14 +55,16 @@ async def _do_withdraw(user_id: int, reply_target: types.Message, state: FSMCont
         user_locks[user_id] = lock
 
     if lock.locked():
+        # Раньше повторное нажатие молча игнорировалось — казалось, что бот завис
+        await reply_target.answer("⏳ Уже проверяю ваш баланс, подождите пару секунд.")
         return
 
     async with lock:
         try:
             record = await db.get_user_invited_count(user_id)
 
-            min_balance: int = url_yaml.get("min_balance", 0)
-            max_withdraw: int = url_yaml.get("max_withdraw", 9_999_999)
+            min_balance = _cfg_int("min_balance", 0)
+            max_withdraw = _cfg_int("max_withdraw", 9_999_999)
             # Баланс хранится в деньгах: смена цены за реферала его не пересчитывает
             balance = int(record["balance_sum"] or 0) if record else 0
 
@@ -101,6 +116,10 @@ async def _do_withdraw(user_id: int, reply_target: types.Message, state: FSMCont
 
         except Exception as e:
             logger.error(f"Ошибка _do_withdraw для user={user_id}: {e}")
+            try:
+                await reply_target.answer("⚠️ Не удалось проверить баланс. Попробуйте чуть позже.")
+            except Exception:
+                pass
 
 
 @router.message(F.text == "💸 Вывести средства")
@@ -140,7 +159,7 @@ async def check_captcha(message: types.Message, state: FSMContext) -> None:
         await message.reply("❌ Неверно! Попробуйте ещё раз.")
         return
 
-    required_members: int = url_yaml.get("group_member_count", 3)
+    required_members = _cfg_int("group_member_count", 3)
     group_link: str = url_yaml.get("subcr_channel", "")
 
     markup = types.InlineKeyboardMarkup(inline_keyboard=[
@@ -166,10 +185,10 @@ async def check_group_members(call: types.CallbackQuery, state: FSMContext) -> N
     # Та же группа, в которой бот считает добавленных (GROUP_ID из .env).
     # Раньше здесь читался subcr_chat_id из url.yml — при расхождении счётчик был всегда 0.
     group_id = GROUP_ID
-    required_members: int = url_yaml.get("group_member_count", 3)
+    required_members = _cfg_int("group_member_count", 3)
 
     record = await db.get_user_add_count(group_id, user_id)
-    added: int = record["add_user_count"] if record else 0
+    added = int(record["add_user_count"] or 0) if record else 0
 
     if added < required_members:
         await call.message.answer(

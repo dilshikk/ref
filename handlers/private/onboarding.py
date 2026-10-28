@@ -42,6 +42,40 @@ def _start_pitch(full_name: str) -> str:
     )
 
 
+def _parse_referrer(args: str | None, user_id: int) -> int | None:
+    """ID пригласившего из /start <id>. Своя ссылка и мусор (from_group и т.п.) игнорируются."""
+    if not args or not args.isdigit():
+        return None
+    referrer_id = int(args)
+    return referrer_id if referrer_id != user_id else None
+
+
+async def _send_referrer_group_link(message: types.Message, referrer_id: int | None) -> None:
+    """
+    Приглашённый пришёл по ссылке на бота (/start <id>). Раньше этот id никак не
+    использовался, и пригласивший ничего не получал. Начисление происходит только
+    при вступлении в группу по персональной ссылке — поэтому даём именно ссылку
+    пригласившего. Все проверки (дубли, антифрод, снятие при выходе) сохраняются.
+    """
+    if referrer_id is None:
+        return
+    try:
+        if not await db.select_user(telegram_id=referrer_id):
+            return
+        link = await db.get_user_invite_link(referrer_id)
+    except Exception as e:
+        logger.warning(f"/start: не удалось получить ссылку пригласившего {referrer_id}: {e}")
+        return
+    if not link:
+        return
+    await message.answer(
+        "👥 Вас пригласил друг. Вступите в группу по этой ссылке 👇",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="➕ Вступить в группу", url=link)
+        ]]),
+    )
+
+
 async def _best_effort(step: Awaitable[Any], what: str, user_id: int) -> None:
     """Вспомогательные шаги (регистрация, статистика, аудит) не должны мешать ответу на /start."""
     try:
@@ -75,8 +109,7 @@ async def _check_subscription(user_id: int) -> bool:
         return True
 
 
-async def _subscription_keyboard(args: str | None) -> InlineKeyboardMarkup:
-    referrer_id = int(args) if args and args.isdigit() else None
+async def _subscription_keyboard(referrer_id: int | None) -> InlineKeyboardMarkup:
     try:
         if referrer_id is not None:
             return await subscribe_keyboard_invited(referrer_id)
@@ -112,6 +145,7 @@ async def start(message: types.Message, command: CommandObject, state: FSMContex
         logger.warning(f"Ошибка при очистке состояния: {e}")
 
     telegram_id = user_obj.id
+    referrer_id = _parse_referrer(command.args, telegram_id)
     await _best_effort(_register_user(user_obj), "регистрация", telegram_id)
     await _best_effort(
         activity_service.record(
@@ -131,10 +165,11 @@ async def start(message: types.Message, command: CommandObject, state: FSMContex
             parse_mode="HTML",
             reply_markup=menu_kb(),
         )
+        await _send_referrer_group_link(message, referrer_id)
         return
 
     # Неподписанный пользователь всегда получает кнопки подписки
-    await message.answer(_SUBSCRIBE_TEXT, reply_markup=await _subscription_keyboard(command.args))
+    await message.answer(_SUBSCRIBE_TEXT, reply_markup=await _subscription_keyboard(referrer_id))
 
 
 async def _handle_subscription_check(call: types.CallbackQuery, variant: str, referrer_id: int | None) -> None:
@@ -150,7 +185,7 @@ async def _handle_subscription_check(call: types.CallbackQuery, variant: str, re
             event="subscription_confirmed",
             chat_id=msg.chat.id,
             session_id=call.id,
-            payload={"variant": variant},
+            payload={"variant": variant, "referrer_id": referrer_id},
         ),
         "запись активности",
         call.from_user.id,
@@ -171,12 +206,13 @@ async def _handle_subscription_check(call: types.CallbackQuery, variant: str, re
         parse_mode="HTML",
         reply_markup=menu_kb(),
     )
+    await _send_referrer_group_link(msg_any, referrer_id)
 
 
 @private_router.callback_query(F.data.startswith("subscribe_true_"))
 async def confirm_subscription_invited(call: types.CallbackQuery) -> None:
     raw = (call.data or "").split("_")[-1]
-    referrer_id = int(raw) if raw.isdigit() else None
+    referrer_id = _parse_referrer(raw, call.from_user.id)
     await _handle_subscription_check(call, "invited", referrer_id)
 
 
