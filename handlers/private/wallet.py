@@ -26,19 +26,24 @@ async def balance(message: types.Message) -> None:
     invited_credit: int = url_yaml.get("invited_credit", 0)
     min_balance: int = url_yaml.get("min_balance", 0)
 
-    available: int = current_count * invited_credit
     total_earned: int = history_count * invited_credit
 
     # ✅ Защита от None в поле amount
-    pending: float = sum(
+    pending: int = int(sum(
         float(row["amount"] or 0) for row in pending_payouts
-    ) if pending_payouts else 0
+    )) if pending_payouts else 0
 
+    # Сумма заявки списывается с баланса только при одобрении, поэтому
+    # вычитаем ожидающие выплаты, чтобы не показывать одни деньги дважды.
+    available: int = max(0, current_count * invited_credit - pending)
+
+    # Кнопку вывода не показываем, пока есть заявка в ожидании:
+    # повторная заявка всё равно будет отклонена.
     markup = (
         types.InlineKeyboardMarkup(inline_keyboard=[[
             types.InlineKeyboardButton(text="💸 Вывести средства", callback_data="go_withdraw")
         ]])
-        if available >= min_balance
+        if available > 0 and available >= min_balance and pending == 0
         else None
     )
 
@@ -46,7 +51,7 @@ async def balance(message: types.Message) -> None:
         f"💰 <b>Ваш баланс</b>\n\n"
         f"✅ Доступно к выводу: <b>{available}</b> сум\n"
         f"📊 Всего заработано: <b>{total_earned}</b> сум\n"
-        f"⏳ Ожидает обработки: <b>{pending:.0f}</b> сум\n\n"
+        f"⏳ Ожидает обработки: <b>{pending}</b> сум\n\n"
         f"📈 Минимум для вывода: <b>{min_balance}</b> сум",
         parse_mode="HTML",
         reply_markup=markup,
