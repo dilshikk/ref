@@ -31,13 +31,19 @@ def setup_middlewares(dispatcher: Dispatcher) -> None:
     from middlewares.throttling import ThrottlingMiddleware
     from middlewares.logger import ActionLoggerMiddleware
     from middlewares.blocked import BlockedUserMiddleware
+    from middlewares.subscription import SubscriptionMiddleware
 
     action_logger = ActionLoggerMiddleware()
     blocked_guard = BlockedUserMiddleware()
+    subscription_guard = SubscriptionMiddleware()
 
     # Блокировка проверяется первой — заблокированный пользователь не доходит до хэндлеров
     dispatcher.message.middleware(blocked_guard)
     dispatcher.callback_query.middleware(blocked_guard)
+
+    # Без подписки на обязательные каналы бот не работает (кроме /start и «Я подписался»)
+    dispatcher.message.middleware(subscription_guard)
+    dispatcher.callback_query.middleware(subscription_guard)
 
     dispatcher.message.middleware(ThrottlingMiddleware(slow_mode_delay=0.5))
     dispatcher.message.middleware(action_logger)

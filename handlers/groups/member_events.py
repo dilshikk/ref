@@ -12,6 +12,17 @@ from loader import db, bot
 
 router = Router(name="groups.member_events")
 
+_DEFAULT_ANTIFRAUD_LIMIT = 100
+
+
+def _antifraud_limit() -> int:
+    """Лимит рефералов в час из настроек админки (🚨 Антифрод лимит)."""
+    try:
+        value = int(url_yaml.get("antispam_referral_limit", _DEFAULT_ANTIFRAUD_LIMIT))
+    except (TypeError, ValueError):
+        return _DEFAULT_ANTIFRAUD_LIMIT
+    return value if value > 0 else _DEFAULT_ANTIFRAUD_LIMIT
+
 
 class ChatGroupFilter(BaseFilter):
     def __init__(self, chat_types: Union[str, list[str]] | None = None):
@@ -90,16 +101,19 @@ async def credit_referral(
         logger.info(f"⛔ Реферер {referrer_id} заблокирован — реферал не засчитан.")
         return False
 
+    limit = _antifraud_limit()
     count_last_hour = await db.get_referrals_last_hour(referrer_id)
-    if count_last_hour >= 100:
-        logger.warning(f"🚨 Антифрод: {referrer_id} пригласил {count_last_hour} за час!")
+    if count_last_hour >= limit:
+        logger.warning(
+            f"🚨 Антифрод: {referrer_id} пригласил {count_last_hour} за час (лимит {limit})!"
+        )
         for admin_id in ADMINS:
             try:
                 await bot.send_message(
                     admin_id,
                     f"🚨 <b>Подозрительная активность!</b>\n\n"
                     f"👤 <a href='tg://user?id={referrer_id}'>{referrer_id}</a>\n"
-                    f"👥 Приглашено за час: <b>{count_last_hour}</b>",
+                    f"👥 Приглашено за час: <b>{count_last_hour}</b> (лимит {limit})",
                     parse_mode="HTML",
                 )
             except Exception as e:
