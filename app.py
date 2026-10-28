@@ -83,6 +83,8 @@ async def database_connected() -> None:
     await db.create_table_broadcast_send_logs()
     await db.create_table_poll_instances()
     await db.create_table_poll_vote_answers()
+    # Кому уже выдана награда за голос (одна на пользователя и вопрос)
+    await db.create_table_poll_vote_rewards()
 
     # Миграции
     await db.add_is_blocked_column()
