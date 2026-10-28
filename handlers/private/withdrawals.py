@@ -329,6 +329,21 @@ async def confirm_withdraw(call: types.CallbackQuery, state: FSMContext) -> None
         await state.clear()
         return
 
+    # Норму «добавил N участников» тоже перепроверяем: форма могла пролежать в FSM
+    # до 7 дней, и за это время добавленные могли выйти из группы
+    required_members = _cfg_int("group_member_count", 3)
+    if required_members > 0:
+        added_row = await db.get_user_add_count(GROUP_ID, user_id)
+        added = int(added_row["add_user_count"] or 0) if added_row else 0
+        if added < required_members:
+            await call.message.answer(
+                f"⚠️ Сейчас добавлено <b>{added}</b> из <b>{required_members}</b> участников "
+                "(кто-то вышел из группы). Добавьте недостающих и начните вывод заново.",
+                parse_mode="HTML",
+            )
+            await state.clear()
+            return
+
     await db.add_payout_request(
         user_id=user_id,
         full_name=call.from_user.full_name,

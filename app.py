@@ -84,6 +84,8 @@ async def database_connected() -> None:
     await db.create_table_poll_vote_rewards()
     # Кто кого добавил в группу вручную: один человек засчитывается один раз
     await db.create_table_group_manual_adds()
+    # Вступления сверх антифрод-лимита ждут решения админа, а не теряются
+    await db.create_table_referral_holds()
     # Состояния форм (переживают перезапуск)
     await fsm_storage.create_table()
 

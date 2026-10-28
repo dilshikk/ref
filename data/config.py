@@ -28,9 +28,23 @@ LOG_GROUP_ID: int = env.int("LOG_GROUP_ID")
 # 📁 Путь к директории с конфигурацией
 config_dir = Path(__file__).parent.parent.resolve() / "data"
 
+# 📄 Путь к url.yml. В Docker файл лежит в отдельной смонтированной директории
+# (URL_YML_PATH=/app/config/url.yml): тогда админка сохраняет его атомарно через
+# временный файл + os.replace, а это невозможно, если смонтирован один файл.
+# Без переменной используется старое место — data/url.yml.
+URL_YML_PATH: Path = Path(env.str("URL_YML_PATH", "") or (config_dir / "url.yml"))
+
+
+def _load_url_yaml() -> dict:
+    with open(URL_YML_PATH, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{URL_YML_PATH} пустой или повреждён: ожидается YAML-словарь")
+    return data
+
+
 # 📄 Загрузка данных из файла url.yml (один раз при старте)
-with open(config_dir / "url.yml", "r", encoding="utf-8") as f:
-    url_yaml: dict = yaml.safe_load(f)
+url_yaml: dict = _load_url_yaml()
 
 CHANNELS: list = url_yaml.get("channels", [])
 
@@ -57,6 +71,4 @@ _warn_group_mismatch()
 
 def get_channels() -> list:
     """Возвращает актуальный список каналов из url.yml (перечитывает файл)."""
-    with open(config_dir / "url.yml", "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
-    return data.get("channels", [])
+    return _load_url_yaml().get("channels", [])

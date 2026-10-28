@@ -1,0 +1,245 @@
+# utils/db/referral_db.py
+"""
+Дополнения к SafeDatabase по итогам аудита.
+
+- approve_payout_if_pending: баланс и норма «добавил N участников» проверяются
+  в том же SQL, что и списание (строки блокируются FOR UPDATE). Раньше баланс
+  проверялся в Python, а списание шло через GREATEST(0, …): выход реферала между
+  ними уводил баланс в ноль.
+- get_payout_approval_state: почему одобрение не прошло — для сообщения админу.
+- referral_holds: вступления сверх антифрод-лимита больше не теряются, а ждут
+  решения администратора (/holds).
+"""
+from __future__ import annotations
+
+from utils.db.safe_db import SafeDatabase
+
+
+class ReferralDatabase(SafeDatabase):
+    async def approve_payout_if_pending(
+        self,
+        request_id: int,
+        credits_to_deduct: int,
+        group_id: int | None = None,
+        members_to_deduct: int = 0,
+    ):
+        """
+        В одной транзакции: pending → approved, списание ровно выплаченной суммы
+        (деньги — из balance_sum, счётчик людей — на credits_to_deduct) и
+        списание members_to_deduct из счётчика «добавил N участников» в группе
+        group_id — чтобы одних и тех же добавленных нельзя было использовать
+        для следующего вывода. Лишние добавленные сверх нормы сохраняются.
+
+        Условия одобрения проверяются ЗДЕСЬ ЖЕ, в SQL, а не в Python перед вызовом:
+        - баланс пользователя не меньше суммы заявки;
+        - добавлено не меньше members_to_deduct участников (если норма > 0).
+        Строки заявки и баланса блокируются (FOR UPDATE), поэтому выход реферала
+        между проверкой и списанием больше не уводит баланс «в ноль» через GREATEST.
+
+        Возвращает строку или None, если заявка уже обработана ИЛИ условия не выполнены
+        (причину можно узнать через get_payout_approval_state).
+        """
+        return await self.execute(
+            """
+            WITH chk AS (
+                SELECT pr.id, pr.user_id, pr.amount
+                FROM PayoutRequests pr
+                JOIN UserInviteCount uic ON uic.user_id = pr.user_id
+                WHERE pr.id = $1
+                  AND pr.status = 'pending'
+                  AND uic.balance_sum >= CAST(CEIL(pr.amount) AS BIGINT)
+                  AND (
+                      $4 <= 0
+                      OR COALESCE((
+                          SELECT gm.add_user_count FROM GroupMembers gm
+                          WHERE gm.user_id = pr.user_id AND gm.group_id = CAST($3 AS BIGINT)
+                      ), 0) >= $4
+                  )
+                FOR UPDATE OF pr, uic
+            ), upd AS (
+                UPDATE PayoutRequests p SET status = 'approved'
+                FROM chk
+                WHERE p.id = chk.id
+                RETURNING p.id, p.user_id, p.amount
+            ), ded AS (
+                UPDATE UserInviteCount uic
+                SET current_count = GREATEST(0, uic.current_count - $2),
+                    balance_sum   = uic.balance_sum - CAST(CEIL(upd.amount) AS BIGINT)
+                FROM upd
+                WHERE uic.user_id = upd.user_id
+                RETURNING uic.user_id
+            ), grp AS (
+                UPDATE GroupMembers gm
+                SET add_user_count = GREATEST(0, gm.add_user_count - $4)
+                FROM upd
+                WHERE gm.user_id = upd.user_id
+                  AND gm.group_id = CAST($3 AS BIGINT)
+                  AND $4 > 0
+                RETURNING gm.user_id
+            )
+            SELECT id, user_id, amount FROM upd
+            """,
+            parameters=(request_id, credits_to_deduct, group_id, max(0, int(members_to_deduct))),
+            fetchone=True,
+        )
+
+    async def get_payout_approval_state(self, request_id: int, group_id: int | None):
+        """Статус заявки, текущий баланс и число добавленных — чтобы объяснить админу отказ."""
+        return await self.execute(
+            """
+            SELECT pr.status,
+                   pr.amount,
+                   COALESCE(uic.balance_sum, 0) AS balance_sum,
+                   COALESCE(gm.add_user_count, 0) AS add_user_count
+            FROM PayoutRequests pr
+            LEFT JOIN UserInviteCount uic ON uic.user_id = pr.user_id
+            LEFT JOIN GroupMembers gm
+                   ON gm.user_id = pr.user_id AND gm.group_id = CAST($2 AS BIGINT)
+            WHERE pr.id = $1
+            """,
+            parameters=(request_id, group_id),
+            fetchone=True,
+        )
+
+    # ======================================================
+    # Удержание рефералов сверх антифрод-лимита
+    # ======================================================
+    async def create_table_referral_holds(self) -> None:
+        """
+        Вступления сверх антифрод-лимита раньше просто терялись. Теперь они
+        записываются «на удержание» и ждут решения администратора.
+        Один приглашённый попадает сюда не более одного раза.
+        """
+        await self.execute(
+            """
+            CREATE TABLE IF NOT EXISTS referral_holds (
+                id               SERIAL PRIMARY KEY,
+                referrer_id      BIGINT NOT NULL,
+                invited_user_id  BIGINT NOT NULL UNIQUE,
+                invited_name     VARCHAR(255),
+                group_id         BIGINT NOT NULL,
+                status           VARCHAR(16) NOT NULL DEFAULT 'pending',
+                created_at       TIMESTAMP NOT NULL DEFAULT NOW(),
+                decided_at       TIMESTAMP NULL,
+                decided_by       BIGINT NULL
+            );
+            """
+        )
+        await self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_referral_holds_referrer_status "
+            "ON referral_holds (referrer_id, status);"
+        )
+
+    async def hold_referral(self, referrer_id: int, invited_user_id: int, invited_name: str, group_id: int) -> bool:
+        """Записывает вступление «на удержание». False — этот человек уже был удержан раньше."""
+        row = await self.execute(
+            """
+            INSERT INTO referral_holds (referrer_id, invited_user_id, invited_name, group_id)
+            VALUES ($1, $2, $3, CAST($4 AS BIGINT))
+            ON CONFLICT (invited_user_id) DO NOTHING
+            RETURNING id
+            """,
+            parameters=(referrer_id, invited_user_id, invited_name[:255], group_id),
+            fetchone=True,
+        )
+        return row is not None
+
+    async def has_referral_hold(self, invited_user_id: int) -> bool:
+        row = await self.execute(
+            "SELECT 1 AS x FROM referral_holds WHERE invited_user_id = $1",
+            parameters=(invited_user_id,),
+            fetchone=True,
+        )
+        return row is not None
+
+    async def cancel_referral_hold_on_leave(self, invited_user_id: int) -> None:
+        """Удержанный вышел из группы до решения админа — начислять за него нечего."""
+        await self.execute(
+            """
+            UPDATE referral_holds SET status = 'left', decided_at = NOW()
+            WHERE invited_user_id = $1 AND status = 'pending'
+            """,
+            parameters=(invited_user_id,),
+        )
+
+    async def list_pending_referral_holds(self, limit: int = 20):
+        """Пригласившие с удержанными вступлениями: сколько и с какого времени."""
+        return await self.execute(
+            """
+            SELECT referrer_id, COUNT(*)::int AS held, MIN(created_at) AS first_at
+            FROM referral_holds
+            WHERE status = 'pending'
+            GROUP BY referrer_id
+            ORDER BY held DESC
+            LIMIT $1
+            """,
+            parameters=(limit,),
+            fetchall=True,
+        )
+
+    async def approve_referral_holds(self, referrer_id: int, admin_id: int, reward: int, group_id: int) -> dict[str, int]:
+        """
+        Атомарно начисляет все удержанные вступления пригласившего по текущей цене:
+        запись в UserInviteMember (её же снимет выход из группы), +N к счётчикам,
+        +N × reward к балансу и +N к «добавил N участников».
+        Возвращает {claimed, credited}: credited может быть меньше, если человек
+        уже был засчитан другим путём.
+        """
+        row = self._as_dict(
+            await self.execute(
+                """
+                WITH claimed AS (
+                    UPDATE referral_holds
+                    SET status = 'approved', decided_at = NOW(), decided_by = $2
+                    WHERE referrer_id = $1 AND status = 'pending'
+                    RETURNING invited_user_id
+                ), ins AS (
+                    INSERT INTO UserInviteMember (user_id, inveted_user_id, reward_sum)
+                    SELECT $1, invited_user_id, CAST($3 AS BIGINT) FROM claimed
+                    ON CONFLICT (inveted_user_id) DO NOTHING
+                    RETURNING inveted_user_id
+                ), n AS (
+                    SELECT COUNT(*)::int AS c FROM ins
+                ), cnt AS (
+                    INSERT INTO UserInviteCount (user_id, current_count, history_count, balance_sum, earned_sum)
+                    SELECT $1, c, c, CAST(c AS BIGINT) * CAST($3 AS BIGINT), CAST(c AS BIGINT) * CAST($3 AS BIGINT)
+                    FROM n WHERE c > 0
+                    ON CONFLICT (user_id) DO UPDATE
+                        SET current_count = UserInviteCount.current_count + EXCLUDED.current_count,
+                            history_count = UserInviteCount.history_count + EXCLUDED.history_count,
+                            balance_sum   = UserInviteCount.balance_sum + EXCLUDED.balance_sum,
+                            earned_sum    = UserInviteCount.earned_sum + EXCLUDED.earned_sum
+                    RETURNING user_id
+                ), grp AS (
+                    INSERT INTO GroupMembers (group_id, user_id, add_user_count)
+                    SELECT CAST($4 AS BIGINT), $1, c FROM n WHERE c > 0
+                    ON CONFLICT (group_id, user_id) DO UPDATE
+                        SET add_user_count = GroupMembers.add_user_count + EXCLUDED.add_user_count
+                    RETURNING user_id
+                )
+                SELECT (SELECT COUNT(*) FROM claimed)::int AS claimed, (SELECT c FROM n) AS credited
+                """,
+                parameters=(referrer_id, admin_id, max(0, int(reward)), group_id),
+                fetchone=True,
+            )
+        )
+        data = row or {}
+        return {"claimed": int(data.get("claimed") or 0), "credited": int(data.get("credited") or 0)}
+
+    async def reject_referral_holds(self, referrer_id: int, admin_id: int) -> int:
+        row = self._as_dict(
+            await self.execute(
+                """
+                WITH rej AS (
+                    UPDATE referral_holds
+                    SET status = 'rejected', decided_at = NOW(), decided_by = $2
+                    WHERE referrer_id = $1 AND status = 'pending'
+                    RETURNING id
+                )
+                SELECT COUNT(*) AS count FROM rej
+                """,
+                parameters=(referrer_id, admin_id),
+                fetchone=True,
+            )
+        )
+        return self._count_from_row(row)

@@ -17,6 +17,7 @@ ADMIN_COMMANDS = [
     BotCommand(command="help", description="Помощь и список команд"),
     BotCommand(command="top10", description="Топ рефералов"),
     BotCommand(command="stats", description="Статистика бота"),
+    BotCommand(command="holds", description="Рефералы на удержании"),
 ]
 
 
