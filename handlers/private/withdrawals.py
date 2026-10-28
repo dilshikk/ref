@@ -46,6 +46,10 @@ async def _do_withdraw(user_id: int, reply_target: types.Message, state: FSMCont
             invited_credit: int = url_yaml.get("invited_credit", 1)
             balance = invited_count * invited_credit
 
+            if await db.is_user_blocked(user_id):
+                await reply_target.answer("⛔ Ваш аккаунт заблокирован. Вывод недоступен.")
+                return
+
             if balance <= 0:
                 await reply_target.answer(
                     "😕 <b>У вас пока нет доступных средств.</b>\n\n"
@@ -64,7 +68,13 @@ async def _do_withdraw(user_id: int, reply_target: types.Message, state: FSMCont
                 )
                 return
 
-            withdraw_amount = min(balance, max_withdraw)
+            # Сумма кратна цене реферала, чтобы при одобрении списать ровно столько рефералов,
+            # сколько выплачено (остаток баланса сохраняется).
+            credits = min(invited_count, max_withdraw // invited_credit) if invited_credit > 0 else 0
+            withdraw_amount = credits * invited_credit
+            if withdraw_amount <= 0:
+                await reply_target.answer("⚠️ Сумма к выводу слишком мала.")
+                return
 
             if balance > max_withdraw:
                 await reply_target.answer(
@@ -120,7 +130,8 @@ async def ask_captcha(call: types.CallbackQuery, state: FSMContext) -> None:
 @router.message(WithdrawalFlow.CAPTCHA)
 async def check_captcha(message: types.Message, state: FSMContext) -> None:
     data = await state.get_data()
-    if not message.text.isdigit() or int(message.text) != data.get("captcha"):
+    text = (message.text or "").strip()
+    if not text.isdigit() or int(text) != data.get("captcha"):
         await message.reply("❌ Неверно! Попробуйте ещё раз.")
         return
 
@@ -175,12 +186,14 @@ async def check_group_members(call: types.CallbackQuery, state: FSMContext) -> N
         parse_mode="HTML",
         reply_markup=markup,
     )
+    # Кнопки «На карту»/«На телефон» принимаются только в этом состоянии
+    await state.set_state(WithdrawalFlow.METHOD)
 
 
 # ======================================================
 # 4. Выбор способа вывода
 # ======================================================
-@router.callback_query(F.data == "withdraw_card")
+@router.callback_query(F.data == "withdraw_card", WithdrawalFlow.METHOD)
 async def withdraw_card(call: types.CallbackQuery, state: FSMContext) -> None:
     await call.answer()
     await state.update_data(withdraw_type="card")
@@ -188,7 +201,7 @@ async def withdraw_card(call: types.CallbackQuery, state: FSMContext) -> None:
     await state.set_state(WithdrawalFlow.CARD_NUMBER)
 
 
-@router.callback_query(F.data == "withdraw_phone")
+@router.callback_query(F.data == "withdraw_phone", WithdrawalFlow.METHOD)
 async def withdraw_phone(call: types.CallbackQuery, state: FSMContext) -> None:
     await call.answer()
     await state.update_data(withdraw_type="phone")
@@ -202,7 +215,7 @@ async def withdraw_phone(call: types.CallbackQuery, state: FSMContext) -> None:
 @router.message(WithdrawalFlow.CARD_NUMBER)
 async def get_card_number(message: types.Message, state: FSMContext) -> None:
     data = await state.get_data()
-    raw = message.text.strip().replace(" ", "")
+    raw = (message.text or "").strip().replace(" ", "")
     withdraw_type = data.get("withdraw_type")
 
     if withdraw_type == "card":
@@ -224,7 +237,7 @@ async def get_card_number(message: types.Message, state: FSMContext) -> None:
 
 @router.message(WithdrawalFlow.CARD_HOLDER)
 async def get_card_holder(message: types.Message, state: FSMContext) -> None:
-    name = message.text.strip()
+    name = (message.text or "").strip()
     if len(name.split()) < 2:
         await message.reply("⚠️ Введите полное имя (Имя Фамилия).")
         return
@@ -270,6 +283,27 @@ async def confirm_withdraw(call: types.CallbackQuery, state: FSMContext) -> None
     balance = data.get("balance")
     payment_info = data.get("payment_info")
     card_holder = data.get("card_holder", "—")
+
+    if not balance or not payment_info:
+        await call.message.answer("⚠️ Сессия устарела. Начните вывод заново.")
+        await state.clear()
+        return
+
+    if await db.is_user_blocked(user_id):
+        await call.message.answer("⛔ Ваш аккаунт заблокирован. Вывод недоступен.")
+        await state.clear()
+        return
+
+    # Перепроверяем актуальный баланс: он мог измениться с начала оформления
+    record = await db.get_user_invited_count(user_id)
+    current_balance = (record["current_count"] if record else 0) * url_yaml.get("invited_credit", 1)
+    if balance > current_balance:
+        await call.message.answer(
+            f"⚠️ Баланс изменился (сейчас <b>{current_balance}</b> сум). Начните вывод заново.",
+            parse_mode="HTML",
+        )
+        await state.clear()
+        return
 
     await db.add_payout_request(
         user_id=user_id,

@@ -85,6 +85,10 @@ async def credit_referral(
         logger.debug(f"Реферал {new_user_id} уже засчитан, пропуск.")
         return
 
+    if await db.is_user_blocked(referrer_id):
+        logger.info(f"⛔ Реферер {referrer_id} заблокирован — реферал не засчитан.")
+        return
+
     count_last_hour = await db.get_referrals_last_hour(referrer_id)
     if count_last_hour >= 100:
         logger.warning(f"🚨 Антифрод: {referrer_id} пригласил {count_last_hour} за час!")

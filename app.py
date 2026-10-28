@@ -30,8 +30,14 @@ def setup_handlers(dispatcher: Dispatcher) -> None:
 def setup_middlewares(dispatcher: Dispatcher) -> None:
     from middlewares.throttling import ThrottlingMiddleware
     from middlewares.logger import ActionLoggerMiddleware
+    from middlewares.blocked import BlockedUserMiddleware
 
     action_logger = ActionLoggerMiddleware()
+    blocked_guard = BlockedUserMiddleware()
+
+    # Блокировка проверяется первой — заблокированный пользователь не доходит до хэндлеров
+    dispatcher.message.middleware(blocked_guard)
+    dispatcher.callback_query.middleware(blocked_guard)
 
     dispatcher.message.middleware(ThrottlingMiddleware(slow_mode_delay=0.5))
     dispatcher.message.middleware(action_logger)
