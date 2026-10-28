@@ -12,6 +12,17 @@ from loader import db, bot
 
 router = Router(name="groups.member_events")
 
+_DEFAULT_ANTIFRAUD_LIMIT = 100
+
+
+def _antifraud_limit() -> int:
+    """Лимит рефералов в час из настроек админки (🚨 Антифрод лимит)."""
+    try:
+        value = int(url_yaml.get("antispam_referral_limit", _DEFAULT_ANTIFRAUD_LIMIT))
+    except (TypeError, ValueError):
+        return _DEFAULT_ANTIFRAUD_LIMIT
+    return value if value > 0 else _DEFAULT_ANTIFRAUD_LIMIT
+
 
 class ChatGroupFilter(BaseFilter):
     def __init__(self, chat_types: Union[str, list[str]] | None = None):
@@ -78,40 +89,42 @@ async def credit_referral(
     referrer_id: int,
     new_user_id: int,
     new_user_name: str = "Пользователь",
-) -> None:
-    """Засчитывает реферал: проверяет дубли, антифрод, начисляет бонус."""
+) -> bool:
+    """Засчитывает реферал: проверяет дубли, антифрод, начисляет бонус.
+    Возвращает True, только если реферал действительно засчитан сейчас."""
     already_invited = await db.select_invited_members(inveted_user_id=new_user_id)
     if already_invited:
         logger.debug(f"Реферал {new_user_id} уже засчитан, пропуск.")
-        return
+        return False
 
     if await db.is_user_blocked(referrer_id):
         logger.info(f"⛔ Реферер {referrer_id} заблокирован — реферал не засчитан.")
-        return
+        return False
 
+    limit = _antifraud_limit()
     count_last_hour = await db.get_referrals_last_hour(referrer_id)
-    if count_last_hour >= 100:
-        logger.warning(f"🚨 Антифрод: {referrer_id} пригласил {count_last_hour} за час!")
+    if count_last_hour >= limit:
+        logger.warning(
+            f"🚨 Антифрод: {referrer_id} пригласил {count_last_hour} за час (лимит {limit})!"
+        )
         for admin_id in ADMINS:
             try:
                 await bot.send_message(
                     admin_id,
                     f"🚨 <b>Подозрительная активность!</b>\n\n"
                     f"👤 <a href='tg://user?id={referrer_id}'>{referrer_id}</a>\n"
-                    f"👥 Приглашено за час: <b>{count_last_hour}</b>",
+                    f"👥 Приглашено за час: <b>{count_last_hour}</b> (лимит {limit})",
                     parse_mode="HTML",
                 )
             except Exception as e:
                 logger.error(f"Не удалось уведомить админа {admin_id}: {e}")
-        return
+        return False
 
-    invited_by_user = await db.get_user_invited_count(referrer_id)
-    if invited_by_user:
-        await db.update_invite_current_history_count_plus_1(referrer_id)
-    else:
-        await db.add_user_invite_count(referrer_id, 1, 1)
-
-    await db.add_user_invite_member(referrer_id, new_user_id)
+    credited = await db.credit_referral_once(referrer_id, new_user_id)
+    if not credited:
+        # Повторное событие от Telegram или параллельная обработка — второй раз не начисляем
+        logger.debug(f"Реферал {new_user_id} уже засчитан (повторное событие), пропуск.")
+        return False
 
     invited_credit = url_yaml.get("invited_credit", 0)
     try:
@@ -125,6 +138,7 @@ async def credit_referral(
         logger.warning(f"Не удалось уведомить реферера {referrer_id}: {e}")
 
     logger.info(f"✅ Реферал засчитан: new={new_user_id} → referrer={referrer_id}")
+    return True
 
 
 @router.chat_member(ChatGroupFilter())
@@ -201,8 +215,10 @@ async def on_user_join(event: types.ChatMemberUpdated) -> None:
 
     # Реферер найден — засчитываем
     try:
-        await credit_referral(referrer_id, user.id, user.full_name)
-        await db.add_or_update_group_member(group_id, referrer_id)
+        # Счётчик «добавил в группу» растёт только при реальном начислении,
+        # иначе повторное событие от Telegram засчитало бы участника дважды
+        if await credit_referral(referrer_id, user.id, user.full_name):
+            await db.add_or_update_group_member(group_id, referrer_id)
     except Exception as e:
         logger.error(f"Ошибка credit_referral [user={user.id}, ref={referrer_id}]: {e}")
 

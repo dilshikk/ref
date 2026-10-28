@@ -9,6 +9,7 @@ from loguru import logger
 from data.config import ADMINS
 from loader import db, bot
 from middlewares.antispam import SmartRateLimiter
+from middlewares.callback_answer import CallbackAutoAnswerMiddleware
 from services.audit_log import audit_log_service
 
 
@@ -28,18 +29,24 @@ def setup_handlers(dispatcher: Dispatcher) -> None:
 
 
 def setup_middlewares(dispatcher: Dispatcher) -> None:
-    from middlewares.throttling import ThrottlingMiddleware
     from middlewares.logger import ActionLoggerMiddleware
     from middlewares.blocked import BlockedUserMiddleware
+    from middlewares.subscription import SubscriptionMiddleware
 
     action_logger = ActionLoggerMiddleware()
     blocked_guard = BlockedUserMiddleware()
+    subscription_guard = SubscriptionMiddleware()
 
     # Блокировка проверяется первой — заблокированный пользователь не доходит до хэндлеров
     dispatcher.message.middleware(blocked_guard)
     dispatcher.callback_query.middleware(blocked_guard)
 
-    dispatcher.message.middleware(ThrottlingMiddleware(slow_mode_delay=0.5))
+    # Без подписки на обязательные каналы бот не работает (кроме /start и «Я подписался»)
+    dispatcher.message.middleware(subscription_guard)
+    dispatcher.callback_query.middleware(subscription_guard)
+
+    # Прежний ThrottlingMiddleware убран: он дублировал SmartRateLimiter и отвечал
+    # «Слишком много запросов» на быстрые ответы в формах, теряя их.
     dispatcher.message.middleware(action_logger)
     dispatcher.callback_query.middleware(action_logger)
 
@@ -79,6 +86,8 @@ async def database_connected() -> None:
     await db.add_invite_link_column()
     await db.add_language_column()
     await db.add_users_created_at_column()
+    # Защита от двойного начисления за одного приглашённого
+    await db.ensure_unique_invited_members()
 
     logger.info("✅ Все таблицы проверены и готовы.")
 
@@ -167,8 +176,14 @@ async def run_polling() -> None:
     dispatcher.startup.register(aiogram_on_startup_polling)
     dispatcher.shutdown.register(aiogram_on_shutdown_polling)
 
-    dispatcher.message.middleware(SmartRateLimiter(limit=1.0))
-    dispatcher.callback_query.middleware(SmartRateLimiter(limit=1.0))
+    # Outer: срабатывает для любого нажатия, даже если хэндлер не найден — кнопки не висят
+    dispatcher.callback_query.outer_middleware(CallbackAutoAnswerMiddleware())
+
+    # Один общий экземпляр: сообщения и нажатия одного пользователя идут по очереди,
+    # чтобы кнопка и ответ в форме не обрабатывались одновременно и не ломали состояние.
+    rate_limiter = SmartRateLimiter(limit=1.0)
+    dispatcher.message.middleware(rate_limiter)
+    dispatcher.callback_query.middleware(rate_limiter)
 
     try:
         await dispatcher.start_polling(

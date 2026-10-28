@@ -6,6 +6,7 @@
 - Атомарные операции с заявками на выплату (защита от двойной обработки)
   и списание только выплаченной суммы вместо обнуления баланса.
 - Проверка блокировки пользователя.
+- Атомарное начисление за реферала (защита от двойного начисления).
 """
 from __future__ import annotations
 
@@ -93,3 +94,52 @@ class SafeDatabase(Database):
             ),
         )
         return bool((row or {}).get("is_blocked"))
+
+    async def ensure_unique_invited_members(self) -> None:
+        """
+        Миграция: один приглашённый может быть засчитан только один раз.
+        Сначала удаляем старые повторы (оставляем самую раннюю запись),
+        иначе уникальный индекс не создастся. Балансы не трогаем.
+        """
+        await self.execute(
+            """
+            DELETE FROM UserInviteMember a
+            USING UserInviteMember b
+            WHERE a.inveted_user_id = b.inveted_user_id
+              AND a.id > b.id
+            """
+        )
+        await self.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_userinvitemember_invited
+            ON UserInviteMember (inveted_user_id)
+            """
+        )
+
+    async def credit_referral_once(self, referrer_id: int, invited_user_id: int) -> bool:
+        """
+        Атомарно: записывает приглашённого и +1 к счётчику реферера.
+        Если этот человек уже засчитан (в т.ч. при двух одновременных событиях
+        от Telegram), ничего не меняет и возвращает False.
+        """
+        row = await self.execute(
+            """
+            WITH ins AS (
+                INSERT INTO UserInviteMember (user_id, inveted_user_id)
+                VALUES ($1, $2)
+                ON CONFLICT (inveted_user_id) DO NOTHING
+                RETURNING user_id
+            ), cnt AS (
+                INSERT INTO UserInviteCount (user_id, current_count, history_count)
+                SELECT user_id, 1, 1 FROM ins
+                ON CONFLICT (user_id) DO UPDATE
+                    SET current_count = UserInviteCount.current_count + 1,
+                        history_count = UserInviteCount.history_count + 1
+                RETURNING user_id
+            )
+            SELECT user_id FROM ins
+            """,
+            parameters=(referrer_id, invited_user_id),
+            fetchone=True,
+        )
+        return row is not None
