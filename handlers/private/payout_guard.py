@@ -6,7 +6,9 @@ approved_/rejected_/payout_receipt_input из admin_panel больше не ср
 
 Исправлено:
 - заявку нельзя одобрить/отклонить повторно (атомарная проверка status='pending');
-- при одобрении списывается только выплаченная сумма, остаток баланса сохраняется.
+- при одобрении списывается только выплаченная сумма, остаток баланса сохраняется;
+- при одобрении из счётчика «добавил N участников» списывается норма для вывода
+  (group_member_count), чтобы одних и тех же людей нельзя было использовать повторно.
 """
 from typing import Any, cast
 
@@ -14,7 +16,7 @@ from aiogram import F, Router, types
 from aiogram.fsm.context import FSMContext
 from loguru import logger
 
-from data.config import ADMINS, url_yaml
+from data.config import ADMINS, GROUP_ID, url_yaml
 from filters import private_only
 from filters.admin import IsBotAdminFilter
 from keyboards.reply_keyboards import finance_kb
@@ -23,6 +25,13 @@ from states.flows import AdminFlow
 from handlers.private.admin_panel import _payout_receipt_kb, _send_payout_report
 
 router = private_only(Router(name="private.payout_guard"))
+
+
+def _required_members() -> int:
+    try:
+        return max(0, int(url_yaml.get("group_member_count", 3) or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 async def _remove_buttons(call: types.CallbackQuery) -> None:
@@ -127,7 +136,15 @@ async def payout_finalize_with_receipt(message: types.Message, state: FSMContext
     amount = int(payout_row.get("amount") or 0)
     credits_to_deduct = -(-amount // invited_credit) if invited_credit > 0 else 0
 
-    approved = cast(dict[str, Any] | None, await db.approve_payout_if_pending(req_id, credits_to_deduct))
+    approved = cast(
+        dict[str, Any] | None,
+        await db.approve_payout_if_pending(
+            req_id,
+            credits_to_deduct,
+            group_id=GROUP_ID,
+            members_to_deduct=_required_members(),
+        ),
+    )
     if not approved:
         await message.answer("⚠️ Заявка уже обработана (одобрена или отклонена).", reply_markup=finance_kb())
         await state.clear()
