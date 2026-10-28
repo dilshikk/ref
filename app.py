@@ -32,6 +32,7 @@ def setup_middlewares(dispatcher: Dispatcher) -> None:
     from middlewares.logger import ActionLoggerMiddleware
     from middlewares.blocked import BlockedUserMiddleware
     from middlewares.subscription import SubscriptionMiddleware
+    from middlewares.text_input import TextInputGuardMiddleware
 
     action_logger = ActionLoggerMiddleware()
     blocked_guard = BlockedUserMiddleware()
@@ -44,6 +45,9 @@ def setup_middlewares(dispatcher: Dispatcher) -> None:
     # Без подписки на обязательные каналы бот не работает (кроме /start и «Я подписался»)
     dispatcher.message.middleware(subscription_guard)
     dispatcher.callback_query.middleware(subscription_guard)
+
+    # Стикер/фото в форме, где нужен текст, больше не роняет обработчик
+    dispatcher.message.middleware(TextInputGuardMiddleware())
 
     # Прежний ThrottlingMiddleware убран: он дублировал SmartRateLimiter и отвечал
     # «Слишком много запросов» на быстрые ответы в формах, теряя их.
