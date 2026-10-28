@@ -1,5 +1,6 @@
 # /www/wwwroot/uz_ibot/handlers/groups/member_events.py
 import asyncio
+import html
 from typing import Union
 
 from aiogram import Router, types
@@ -66,9 +67,10 @@ async def _send_welcome_dm(user: types.User, group_id: int) -> None:
     bot_info = await bot.me()
 
     try:
+        # Имя экранируем: символы < > & ломали HTML, и Telegram отклонял сообщение
         await bot.send_message(
             user.id,
-            f"👋 Привет, <b>{user.full_name}</b>!\n\n"
+            f"👋 Привет, <b>{html.escape(user.full_name)}</b>!\n\n"
             f"Ты вступил в группу.\n\n"
             f"🤑 Приглашай друзей и получай по "
             f"<b>{url_yaml.get('invited_credit', 0)}</b> сум за каждого!\n\n"
@@ -155,7 +157,7 @@ async def credit_referral(
     try:
         await bot.send_message(
             referrer_id,
-            f"🎉 <b>{new_user_name} вступил по вашей ссылке!</b>\n\n"
+            f"🎉 <b>{html.escape(new_user_name)} вступил по вашей ссылке!</b>\n\n"
             f"💰 Вам начислено <b>{invited_credit}</b> сум.{hold_note}",
             parse_mode="HTML",
         )
@@ -190,12 +192,24 @@ async def reverse_referral_on_leave(user: types.User, group_id: int) -> None:
     try:
         await bot.send_message(
             referrer_id,
-            f"↩️ <b>{user.full_name}</b> вышел из группы.\n\n"
+            f"↩️ <b>{html.escape(user.full_name)}</b> вышел из группы.\n\n"
             f"💸 Начисление <b>{reward}</b> сум за этого участника снято.",
             parse_mode="HTML",
         )
     except Exception as e:
         logger.warning(f"Не удалось уведомить реферера {referrer_id} о снятии: {e}")
+
+
+async def reverse_manual_add_on_leave(user: types.User, group_id: int) -> None:
+    """Участник, добавленный вручную, вышел — снимаем его из счётчика «добавил N участников».
+    Без этого можно было добавить, удалить и снова добавить одного и того же человека."""
+    try:
+        inviter_id = await db.reverse_manual_add_on_leave(group_id, user.id, _referral_hold_hours())
+    except Exception as e:
+        logger.error(f"Ошибка снятия ручного добавления [user={user.id}]: {e}")
+        return
+    if inviter_id:
+        logger.info(f"↩️ Ручное добавление снято: {user.id} вышел → inviter={inviter_id}")
 
 
 @router.chat_member(ChatGroupFilter())
@@ -222,6 +236,7 @@ async def on_user_join(event: types.ChatMemberUpdated) -> None:
     # Выход из группы (сам или удалён админом) — снимаем начисление
     if new_status in _LEFT_STATUSES and old_status not in _LEFT_STATUSES:
         await reverse_referral_on_leave(user, group_id)
+        await reverse_manual_add_on_leave(user, group_id)
         return
 
     # Только новые вступления
@@ -248,11 +263,16 @@ async def on_user_join(event: types.ChatMemberUpdated) -> None:
     # Fallback: добавлен вручную
     if not referrer_id and event.from_user and event.from_user.id != user.id:
         inviter = event.from_user
-        try:
-            await db.add_or_update_group_member(group_id, inviter.id)
-            logger.info(f"➕ {inviter.full_name} добавил {user.full_name} вручную")
-        except Exception as e:
-            logger.error(f"Ошибка add_or_update_group_member: {e}")
+        if not inviter.is_bot:
+            try:
+                # Каждый человек засчитывается добавившему только один раз: повторное
+                # добавление того же участника (после удаления) счётчик не увеличивает
+                if await db.credit_manual_add_once(group_id, inviter.id, user.id):
+                    logger.info(f"➕ {inviter.full_name} добавил {user.full_name} вручную")
+                else:
+                    logger.info(f"↪️ {user.full_name} уже засчитан ранее — счётчик {inviter.id} не меняется")
+            except Exception as e:
+                logger.error(f"Ошибка credit_manual_add_once: {e}")
         await _send_welcome_dm(user, group_id)
         return
 
@@ -287,11 +307,15 @@ async def on_user_join(event: types.ChatMemberUpdated) -> None:
     await _send_welcome_dm(user, group_id)
 
 
-@router.message(ChatGroupFilter())
-async def debug_all_messages(message: types.Message) -> None:
-    logger.warning(f"📨 Сообщение в группе: {message.text or '[без текста]'}")
+# Обработчика всех сообщений группы здесь больше нет: он стоял раньше
+# onboarding.group_router и забирал каждое сообщение себе, поэтому бот никогда
+# не отвечал в группе на «привет»/«спасибо», а лог засорялся предупреждениями.
 
 
 @router.my_chat_member(ChatGroupFilter())
-async def debug_my_chat_member(event: types.ChatMemberUpdated) -> None:
-    logger.warning(f"🤖 my_chat_member: {event.new_chat_member.status}")
+async def on_bot_status_change(event: types.ChatMemberUpdated) -> None:
+    # Добавление/удаление самого бота в группе — обычное событие, не предупреждение
+    logger.info(
+        f"🤖 Статус бота в чате {event.chat.id}: "
+        f"{event.old_chat_member.status} → {event.new_chat_member.status}"
+    )

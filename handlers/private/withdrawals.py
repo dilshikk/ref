@@ -1,5 +1,6 @@
 # /www/wwwroot/uz_ibot/handlers/private/withdrawals.py
 import asyncio
+import html
 import random
 from weakref import WeakValueDictionary
 
@@ -18,6 +19,13 @@ router = private_only(Router(name="private.withdrawals"))
 
 # ✅ WeakValueDictionary — неактивные локи удаляются автоматически
 user_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
+
+
+def _mask_payment_info(value: str | None) -> str:
+    """Карта/телефон для журналов: только последние 4 цифры.
+    Полные реквизиты хранятся лишь в заявке на выплату — там они нужны админу."""
+    digits = "".join(ch for ch in (value or "") if ch.isdigit())
+    return f"****{digits[-4:]}" if digits else "—"
 
 
 # ======================================================
@@ -247,11 +255,12 @@ async def _show_confirm(message: types.Message, state: FSMContext) -> None:
         types.InlineKeyboardButton(text="✅ Подтвердить", callback_data="confirm_withdraw"),
         types.InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_withdraw"),
     ]])
+    # Введённое пользователем экранируем, иначе символы < > & ломают HTML
     await message.answer(
         f"📋 <b>Проверьте данные:</b>\n\n"
         f"💰 Сумма: <b>{data.get('balance')}</b> сум\n"
-        f"💳 Реквизиты: <code>{data.get('payment_info')}</code>\n"
-        f"👤 Держатель: <b>{data.get('card_holder', '—')}</b>",
+        f"💳 Реквизиты: <code>{html.escape(str(data.get('payment_info')))}</code>\n"
+        f"👤 Держатель: <b>{html.escape(str(data.get('card_holder', '—')))}</b>",
         parse_mode="HTML",
         reply_markup=markup,
     )
@@ -308,12 +317,13 @@ async def confirm_withdraw(call: types.CallbackQuery, state: FSMContext) -> None
         card_number=payment_info,
         amount=balance,
     )
+    # В журнал действий — только последние 4 цифры реквизитов
     await audit_log_service.record_user_action(
         actor_id=user_id,
         action="withdrawal_requested",
         entity_type="payout_request",
         entity_id=user_id,
-        new_value={"amount": balance, "payment_info": payment_info, "card_holder": card_holder},
+        new_value={"amount": balance, "payment_info": _mask_payment_info(payment_info)},
         payload={"withdraw_type": data.get("withdraw_type")},
     )
     await activity_service.record(
@@ -330,16 +340,17 @@ async def confirm_withdraw(call: types.CallbackQuery, state: FSMContext) -> None
     )
     await state.clear()
 
+    # Имя и держатель экранируются: иначе Telegram отклонял сообщение и админ не узнавал о заявке
     for admin in ADMINS:
         try:
             await call.bot.send_message(
                 admin,
                 f"📢 <b>Новая заявка на вывод</b>\n\n"
-                f"👤 <a href='tg://user?id={user_id}'>{call.from_user.full_name}</a>\n"
+                f"👤 <a href='tg://user?id={user_id}'>{html.escape(call.from_user.full_name)}</a>\n"
                 f"🆔 ID: <code>{user_id}</code>\n"
                 f"💰 Сумма: <b>{balance}</b> сум\n"
-                f"💳 Реквизиты: <code>{payment_info}</code>\n"
-                f"👤 Держатель: {card_holder}",
+                f"💳 Реквизиты: <code>{html.escape(str(payment_info))}</code>\n"
+                f"👤 Держатель: {html.escape(str(card_holder))}",
                 parse_mode="HTML",
             )
         except Exception as e:

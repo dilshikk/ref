@@ -14,6 +14,8 @@
 - При одобрении выплаты из счётчика «добавил N участников» списывается норма,
   поэтому одни и те же добавленные не открывают вывод повторно (пункт 11).
 - Награда за голос (vote_credit) начисляется один раз на вопрос (пункт 14).
+- Ручное добавление в группу засчитывается один раз на человека, а при выходе
+  добавленного (в срок удержания) снимается — накрутка удалением/добавлением не работает.
 """
 from __future__ import annotations
 
@@ -357,6 +359,92 @@ class SafeDatabase(Database):
             parameters=(invited_user_id, int(hold_hours), group_id),
             fetchone=True,
         )
+
+    # ======================================================
+    # Ручное добавление в группу (защита от накрутки)
+    # ======================================================
+    async def create_table_group_manual_adds(self) -> None:
+        """
+        Кто кого добавил в группу вручную. Один человек в группе засчитывается
+        только один раз — повторное добавление после удаления счётчик не увеличивает.
+        """
+        await self.execute(
+            """
+            CREATE TABLE IF NOT EXISTS group_manual_adds (
+                id               SERIAL PRIMARY KEY,
+                group_id         BIGINT NOT NULL,
+                inviter_id       BIGINT NOT NULL,
+                invited_user_id  BIGINT NOT NULL,
+                added_at         TIMESTAMP NOT NULL DEFAULT NOW(),
+                reversed_at      TIMESTAMP NULL,
+                UNIQUE (group_id, invited_user_id)
+            );
+            """
+        )
+
+    async def credit_manual_add_once(self, group_id: int, inviter_id: int, invited_user_id: int) -> bool:
+        """
+        Атомарно: запоминает пару «кто кого добавил» и +1 к «добавил N участников».
+        Если этого человека в группе уже засчитывали (кому угодно) — ничего не меняет
+        и возвращает False.
+        """
+        row = await self.execute(
+            """
+            WITH ins AS (
+                INSERT INTO group_manual_adds (group_id, inviter_id, invited_user_id)
+                VALUES (CAST($1 AS BIGINT), $2, $3)
+                ON CONFLICT (group_id, invited_user_id) DO NOTHING
+                RETURNING group_id, inviter_id
+            ), cnt AS (
+                INSERT INTO GroupMembers (group_id, user_id, add_user_count)
+                SELECT group_id, inviter_id, 1 FROM ins
+                ON CONFLICT (group_id, user_id) DO UPDATE
+                    SET add_user_count = GroupMembers.add_user_count + 1
+                RETURNING user_id
+            )
+            SELECT inviter_id FROM ins
+            """,
+            parameters=(group_id, inviter_id, invited_user_id),
+            fetchone=True,
+        )
+        return row is not None
+
+    async def reverse_manual_add_on_leave(self, group_id: int, invited_user_id: int, hold_hours: int) -> int | None:
+        """
+        Добавленный вручную вышел из группы в течение hold_hours (0 — всегда):
+        -1 к «добавил N участников» у добавившего. Запись остаётся (с reversed_at),
+        поэтому повторное добавление того же человека снова не засчитается.
+        Возвращает ID добавившего или None, если снимать нечего.
+        """
+        row = cast(
+            dict[str, Any] | None,
+            await self.execute(
+                """
+                WITH rev AS (
+                    UPDATE group_manual_adds
+                    SET reversed_at = NOW()
+                    WHERE group_id = CAST($1 AS BIGINT)
+                      AND invited_user_id = $2
+                      AND reversed_at IS NULL
+                      AND (
+                          CAST($3 AS INT) <= 0
+                          OR added_at >= NOW() - make_interval(hours => CAST($3 AS INT))
+                      )
+                    RETURNING group_id, inviter_id
+                ), grp AS (
+                    UPDATE GroupMembers gm
+                    SET add_user_count = GREATEST(0, gm.add_user_count - 1)
+                    FROM rev
+                    WHERE gm.user_id = rev.inviter_id AND gm.group_id = rev.group_id
+                    RETURNING gm.user_id
+                )
+                SELECT inviter_id FROM rev
+                """,
+                parameters=(group_id, invited_user_id, int(hold_hours)),
+                fetchone=True,
+            ),
+        )
+        return int(row["inviter_id"]) if row else None
 
     # ======================================================
     # Награда за голос (пункт 14)
