@@ -39,12 +39,11 @@ async def _do_withdraw(user_id: int, reply_target: types.Message, state: FSMCont
     async with lock:
         try:
             record = await db.get_user_invited_count(user_id)
-            invited_count = record["current_count"] if record else 0
 
             min_balance: int = url_yaml.get("min_balance", 0)
             max_withdraw: int = url_yaml.get("max_withdraw", 9_999_999)
-            invited_credit: int = url_yaml.get("invited_credit", 1)
-            balance = invited_count * invited_credit
+            # Баланс хранится в деньгах: смена цены за реферала его не пересчитывает
+            balance = int(record["balance_sum"] or 0) if record else 0
 
             if await db.is_user_blocked(user_id):
                 await reply_target.answer("⛔ Ваш аккаунт заблокирован. Вывод недоступен.")
@@ -68,10 +67,8 @@ async def _do_withdraw(user_id: int, reply_target: types.Message, state: FSMCont
                 )
                 return
 
-            # Сумма кратна цене реферала, чтобы при одобрении списать ровно столько рефералов,
-            # сколько выплачено (остаток баланса сохраняется).
-            credits = min(invited_count, max_withdraw // invited_credit) if invited_credit > 0 else 0
-            withdraw_amount = credits * invited_credit
+            # При одобрении списывается ровно эта сумма, остаток баланса сохраняется
+            withdraw_amount = min(balance, max_withdraw)
             if withdraw_amount <= 0:
                 await reply_target.answer("⚠️ Сумма к выводу слишком мала.")
                 return
@@ -296,7 +293,7 @@ async def confirm_withdraw(call: types.CallbackQuery, state: FSMContext) -> None
 
     # Перепроверяем актуальный баланс: он мог измениться с начала оформления
     record = await db.get_user_invited_count(user_id)
-    current_balance = (record["current_count"] if record else 0) * url_yaml.get("invited_credit", 1)
+    current_balance = int(record["balance_sum"] or 0) if record else 0
     if balance > current_balance:
         await call.message.answer(
             f"⚠️ Баланс изменился (сейчас <b>{current_balance}</b> сум). Начните вывод заново.",
