@@ -127,7 +127,7 @@ async def _antifraud_alert(referrer_id: int, count_last_hour: int, limit: int) -
         if now - sent > _ANTIFRAUD_ALERT_COOLDOWN * 2:
             _antifraud_alerts.pop(key, None)
 
-    skipped_note = f"\n⏸ Отклонено вступлений за прошлый час: <b>{skipped + 1}</b>" if skipped else ""
+    skipped_note = f"\n⏸ Отложено вступлений за прошлый час: <b>{skipped + 1}</b>" if skipped else ""
     for admin_id in ADMINS:
         try:
             await bot.send_message(
@@ -135,7 +135,8 @@ async def _antifraud_alert(referrer_id: int, count_last_hour: int, limit: int) -
                 f"🚨 <b>Подозрительная активность!</b>\n\n"
                 f"👤 <a href='tg://user?id={referrer_id}'>{referrer_id}</a>\n"
                 f"👥 Приглашено за час: <b>{count_last_hour}</b> (лимит {limit})\n"
-                f"Новые вступления по его ссылке не оплачиваются, пока активность не снизится."
+                f"Вступления сверх лимита отложены «на удержание» и ждут вашей проверки: "
+                f"/holds — список, там же можно начислить или отклонить."
                 f"{skipped_note}\n\n"
                 f"Следующее уведомление об этом пользователе — не раньше чем через час.",
                 parse_mode="HTML",
@@ -148,13 +149,14 @@ async def credit_referral(
     referrer_id: int,
     new_user_id: int,
     new_user_name: str = "Пользователь",
+    group_id: int = GROUP_ID,
 ) -> bool:
     """Засчитывает реферал: проверяет дубли, антифрод, начисляет бонус.
     Возвращает True, только если реферал действительно засчитан сейчас."""
     already_invited = await db.select_invited_members(inveted_user_id=new_user_id)
-    if already_invited:
+    if already_invited or await db.has_referral_hold(new_user_id):
         # Сюда же попадает повторное вступление после выхода: деньги второй раз не начисляются
-        logger.debug(f"Реферал {new_user_id} уже засчитан, пропуск.")
+        logger.debug(f"Реферал {new_user_id} уже засчитан или был на удержании, пропуск.")
         return False
 
     if await db.is_user_blocked(referrer_id):
@@ -164,21 +166,27 @@ async def credit_referral(
     limit = _antifraud_limit()
     count_last_hour = await db.get_referrals_last_hour(referrer_id)
     if count_last_hour >= limit:
+        # Раньше такие вступления не записывались нигде и терялись навсегда, а
+        # пользователю писали «Попробуйте позже». Теперь — «на удержание»: админ
+        # проверит и начислит их вручную (/holds).
+        held = await db.hold_referral(referrer_id, new_user_id, new_user_name, group_id)
         logger.warning(
             f"🚨 Антифрод: {referrer_id} пригласил {count_last_hour} за час (лимит {limit}), "
-            f"вступление {new_user_id} не оплачено"
+            f"вступление {new_user_id} {'отложено на удержание' if held else 'уже было на удержании'}"
         )
+        if not held:
+            return False
         await _antifraud_alert(referrer_id, count_last_hour, limit)
-        # Пригласившему объясняем, почему денег нет, — иначе он думает, что бот сломан
         try:
             await bot.send_message(
                 referrer_id,
-                f"⏸ {html.escape(new_user_name)} вступил по вашей ссылке, но начисление не произведено: "
-                f"превышен лимит приглашений за час ({limit}). Попробуйте позже.",
+                f"⏸ {html.escape(new_user_name)} вступил по вашей ссылке. Вы превысили лимит "
+                f"приглашений за час ({limit}), поэтому начисление отложено на проверку "
+                f"администратором. После проверки деньги будут начислены — повторять ничего не нужно.",
                 parse_mode="HTML",
             )
         except Exception as e:
-            logger.debug(f"Не удалось уведомить реферера {referrer_id} об антифроде: {e}")
+            logger.debug(f"Не удалось уведомить реферера {referrer_id} об удержании: {e}")
         return False
 
     # Цена фиксируется в момент начисления: если админ потом её поменяет,
@@ -218,6 +226,8 @@ async def reverse_referral_on_leave(user: types.User, group_id: int) -> None:
 
     hold_hours = _referral_hold_hours()
     try:
+        # Ушёл до решения админа по удержанию — начислять за него не нужно
+        await db.cancel_referral_hold_on_leave(user.id)
         reversed_row = await db.reverse_referral_on_leave(user.id, hold_hours, group_id)
     except Exception as e:
         logger.error(f"Ошибка снятия реферала при выходе [user={user.id}]: {e}")
@@ -341,7 +351,7 @@ async def on_user_join(event: types.ChatMemberUpdated) -> None:
     try:
         # Счётчик «добавил в группу» растёт только при реальном начислении,
         # иначе повторное событие от Telegram засчитало бы участника дважды
-        if await credit_referral(referrer_id, user.id, user.full_name):
+        if await credit_referral(referrer_id, user.id, user.full_name, group_id):
             await db.add_or_update_group_member(group_id, referrer_id)
     except Exception as e:
         logger.error(f"Ошибка credit_referral [user={user.id}, ref={referrer_id}]: {e}")

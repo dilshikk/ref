@@ -12,8 +12,9 @@ approved_/rejected_/payout_receipt_input из admin_panel больше не ср
 - кнопки «одобрить/отклонить» убираются только после окончательного решения:
   если админ нажал «одобрить» и не прислал чек, заявку можно добить или отклонить позже;
 - шаг с чеком можно отменить, админ больше не «застревает» в нём;
-- выплата не одобряется, если баланс пользователя стал меньше суммы заявки
-  (например, приглашённые вышли из группы), — раньше баланс молча уходил в ноль.
+- выплата не одобряется, если баланс пользователя стал меньше суммы заявки или
+  число добавленных участников стало меньше нормы (например, приглашённые вышли
+  из группы). Проверка идёт в том же SQL, что и списание, — атомарно.
 """
 from typing import Any, cast
 
@@ -196,42 +197,52 @@ async def payout_finalize_with_receipt(message: types.Message, state: FSMContext
         await state.clear()
         return
 
-    # Баланс мог уменьшиться после подачи заявки (приглашённые вышли из группы).
-    # Раньше списание всё равно проходило и баланс молча обнулялся — деньги уходили «в минус».
-    amount = int(payout_row.get("amount") or 0)
-    user_id = int(payout_row["user_id"])
-    record = await db.get_user_invited_count(user_id)
-    current_balance = int(record["balance_sum"] or 0) if record else 0
-    if current_balance < amount:
-        await state.clear()
-        await message.answer(
-            f"⛔ Выплата #{req_id} не подтверждена.\n"
-            f"Сумма заявки: {amount} сум, а баланс пользователя сейчас: {current_balance} сум "
-            "(часть приглашённых, скорее всего, вышла из группы).\n"
-            "Отклоните заявку — пользователь сможет подать новую на актуальную сумму.",
-            reply_markup=finance_kb(),
-        )
-        return
-
     # Списываем только выплаченную сумму (в рефералах, с округлением вверх),
     # а не обнуляем весь баланс: остаток и новые рефералы сохраняются.
+    amount = int(payout_row.get("amount") or 0)
     invited_credit = _invited_credit()
     credits_to_deduct = -(-amount // invited_credit) if invited_credit > 0 else 0
+    required_members = _required_members()
 
+    # Баланс и норма «добавил N участников» проверяются внутри того же SQL, что и
+    # списание: между проверкой и списанием никто не успеет выйти из группы.
     approved = cast(
         dict[str, Any] | None,
         await db.approve_payout_if_pending(
             req_id,
             credits_to_deduct,
             group_id=GROUP_ID,
-            members_to_deduct=_required_members(),
+            members_to_deduct=required_members,
         ),
     )
-    await _remove_buttons_by_id(message, msg_chat_id, msg_id)
     if not approved:
-        await message.answer("⚠️ Заявка уже обработана (одобрена или отклонена).", reply_markup=finance_kb())
         await state.clear()
+        info = cast(dict[str, Any] | None, await db.get_payout_approval_state(req_id, GROUP_ID))
+        if not info or info.get("status") != "pending":
+            await _remove_buttons_by_id(message, msg_chat_id, msg_id)
+            await message.answer("⚠️ Заявка уже обработана (одобрена или отклонена).", reply_markup=finance_kb())
+            return
+        balance = int(info.get("balance_sum") or 0)
+        added = int(info.get("add_user_count") or 0)
+        reasons: list[str] = []
+        if balance < amount:
+            reasons.append(
+                f"• баланс пользователя сейчас {balance} сум при сумме заявки {amount} сум "
+                "(часть приглашённых, скорее всего, вышла из группы)"
+            )
+        if required_members > 0 and added < required_members:
+            reasons.append(f"• добавлено участников: {added} из {required_members} (кто-то вышел из группы)")
+        if not reasons:
+            reasons.append("• условия изменились во время подтверждения, повторите попытку")
+        # Кнопки под заявкой оставляем: админ может отклонить её
+        await message.answer(
+            f"⛔ Выплата #{req_id} не подтверждена:\n" + "\n".join(reasons) + "\n\n"
+            "Отклоните заявку — пользователь сможет подать новую, когда условия снова выполнятся.",
+            reply_markup=finance_kb(),
+        )
         return
+
+    await _remove_buttons_by_id(message, msg_chat_id, msg_id)
 
     if message.bot is not None:
         try:
