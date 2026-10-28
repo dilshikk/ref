@@ -1,9 +1,12 @@
 # /www/wwwroot/uz_ibot/handlers/private/onboarding.py
+import html
+from typing import Any, Awaitable, cast
+
 from aiogram import Router, types, F
 from aiogram.filters import CommandStart, CommandObject
 from aiogram.fsm.context import FSMContext
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from loguru import logger
-from typing import Any, cast
 
 from filters import private_only
 from data.config import url_yaml
@@ -18,12 +21,16 @@ private_router = private_only(Router(name="private.onboarding.start"))
 group_router = Router(name="private.onboarding.group")
 router = private_router
 
+_SUBSCRIBE_TEXT = "Чтобы пользоваться ботом, подпишитесь на все каналы 👇"
+
 
 def _start_pitch(full_name: str) -> str:
     invited_credit = int(url_yaml.get("invited_credit", 0) or 0)
     min_balance = int(url_yaml.get("min_balance", 0) or 0)
+    # Имя экранируем: символы < > & в имени ломали HTML, Telegram отклонял
+    # сообщение, и пользователь на /start не получал ничего
     return (
-        f"👋 Привет, <b>{full_name}</b>!\n\n"
+        f"👋 Привет, <b>{html.escape(full_name)}</b>!\n\n"
         "💸 <b>Здесь вы зарабатываете на приглашениях</b>\n"
         f"• За каждого приглашённого: <b>{invited_credit} сум</b>\n"
         f"• Минимальный вывод: <b>{min_balance} сум</b>\n"
@@ -33,6 +40,53 @@ def _start_pitch(full_name: str) -> str:
         "2) Поделитесь ссылкой\n"
         "3) Проверяйте доход в «💰 Баланс»"
     )
+
+
+async def _best_effort(step: Awaitable[Any], what: str, user_id: int) -> None:
+    """Вспомогательные шаги (регистрация, статистика, аудит) не должны мешать ответу на /start."""
+    try:
+        await step
+    except Exception as e:
+        logger.error(f"/start: не удалось выполнить «{what}» user={user_id}: {e}")
+
+
+async def _register_user(user_obj: types.User) -> None:
+    user = await db.select_user(telegram_id=user_obj.id)
+    if user:
+        return
+    await db.add_user(full_name=user_obj.full_name, username=user_obj.username, telegram_id=user_obj.id)
+    await audit_log_service.record_user_action(
+        actor_id=user_obj.id,
+        action="user_registered",
+        entity_type="user",
+        entity_id=user_obj.id,
+        new_value={"full_name": user_obj.full_name, "username": user_obj.username},
+        payload={"source": "start_command"},
+    )
+
+
+async def _check_subscription(user_id: int) -> bool:
+    # Как и в SubscriptionMiddleware: если проверить не получилось, пускаем,
+    # а не оставляем человека без ответа
+    try:
+        return await is_user_subscribed(user_id=user_id, use_cache=False)
+    except Exception as e:
+        logger.error(f"/start: проверка подписки не удалась user={user_id}: {e}")
+        return True
+
+
+async def _subscription_keyboard(args: str | None) -> InlineKeyboardMarkup:
+    referrer_id = int(args) if args and args.isdigit() else None
+    try:
+        if referrer_id is not None:
+            return await subscribe_keyboard_invited(referrer_id)
+        return await subscribe_keyboard()
+    except Exception as e:
+        logger.error(f"/start: не удалось собрать кнопки каналов: {e}")
+        callback = f"subscribe_true_{referrer_id}" if referrer_id is not None else "subscribe_true"
+        return InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Я подписался", callback_data=callback)
+        ]])
 
 
 @group_router.message(F.chat.type.in_({"group", "supergroup"}))
@@ -49,9 +103,7 @@ async def respond_in_group(message: types.Message) -> None:
 @private_router.message(CommandStart())
 async def start(message: types.Message, command: CommandObject, state: FSMContext) -> None:
     user_obj = message.from_user
-    if user_obj is None:
-        return
-    if user_obj.is_bot:
+    if user_obj is None or user_obj.is_bot:
         return
 
     try:
@@ -60,48 +112,29 @@ async def start(message: types.Message, command: CommandObject, state: FSMContex
         logger.warning(f"Ошибка при очистке состояния: {e}")
 
     telegram_id = user_obj.id
-    full_name = user_obj.full_name
-    username = user_obj.username
-
-    user = await db.select_user(telegram_id=telegram_id)
-    if not user:
-        await db.add_user(full_name=full_name, username=username, telegram_id=telegram_id)
-        await audit_log_service.record_user_action(
-            actor_id=telegram_id,
-            action="user_registered",
-            entity_type="user",
-            entity_id=telegram_id,
-            new_value={"full_name": full_name, "username": username},
-            payload={"source": "start_command"},
-        )
-
-    await activity_service.record(
-        user_id=telegram_id,
-        event="bot_start",
-        chat_id=message.chat.id,
-        session_id=str(message.message_id),
-        payload={"command_args": command.args},
+    await _best_effort(_register_user(user_obj), "регистрация", telegram_id)
+    await _best_effort(
+        activity_service.record(
+            user_id=telegram_id,
+            event="bot_start",
+            chat_id=message.chat.id,
+            session_id=str(message.message_id),
+            payload={"command_args": command.args},
+        ),
+        "запись активности",
+        telegram_id,
     )
 
-    if await is_user_subscribed(user_id=telegram_id, use_cache=False):
+    if await _check_subscription(telegram_id):
         await message.answer(
-            _start_pitch(full_name),
+            _start_pitch(user_obj.full_name),
             parse_mode="HTML",
             reply_markup=menu_kb(),
         )
         return
 
     # Неподписанный пользователь всегда получает кнопки подписки
-    # (раньше бот молчал, если в url.yml был пустой список channels)
-    keyboard = (
-        await subscribe_keyboard_invited(int(command.args))
-        if command.args and command.args.isdigit()
-        else await subscribe_keyboard()
-    )
-    await message.answer(
-        "Чтобы пользоваться ботом, подпишитесь на все каналы 👇",
-        reply_markup=keyboard,
-    )
+    await message.answer(_SUBSCRIBE_TEXT, reply_markup=await _subscription_keyboard(command.args))
 
 
 async def _handle_subscription_check(call: types.CallbackQuery, variant: str, referrer_id: int | None) -> None:
@@ -111,15 +144,19 @@ async def _handle_subscription_check(call: types.CallbackQuery, variant: str, re
         return
 
     msg_any = cast(Any, msg)
-    await activity_service.record(
-        user_id=call.from_user.id,
-        event="subscription_confirmed",
-        chat_id=msg.chat.id,
-        session_id=call.id,
-        payload={"variant": variant},
+    await _best_effort(
+        activity_service.record(
+            user_id=call.from_user.id,
+            event="subscription_confirmed",
+            chat_id=msg.chat.id,
+            session_id=call.id,
+            payload={"variant": variant},
+        ),
+        "запись активности",
+        call.from_user.id,
     )
 
-    if not await is_user_subscribed(user_id=call.from_user.id, use_cache=False):
+    if not await _check_subscription(call.from_user.id):
         # Сообщение не удаляем — пользователь видит кнопки каналов и пробует снова
         await call.answer("❗️ Вы подписались не на все каналы", show_alert=True)
         return
