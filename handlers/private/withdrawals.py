@@ -8,7 +8,7 @@ from aiogram.fsm.context import FSMContext
 from loguru import logger
 
 from filters import private_only
-from data.config import ADMINS, url_yaml
+from data.config import ADMINS, GROUP_ID, url_yaml
 from loader import db
 from states.flows import WithdrawalFlow
 from services.activity import activity_service
@@ -155,12 +155,10 @@ async def check_captcha(message: types.Message, state: FSMContext) -> None:
 async def check_group_members(call: types.CallbackQuery, state: FSMContext) -> None:
     await call.answer()
     user_id = call.from_user.id
-    group_id = url_yaml.get("subcr_chat_id")
+    # Та же группа, в которой бот считает добавленных (GROUP_ID из .env).
+    # Раньше здесь читался subcr_chat_id из url.yml — при расхождении счётчик был всегда 0.
+    group_id = GROUP_ID
     required_members: int = url_yaml.get("group_member_count", 3)
-
-    if not group_id:
-        await call.message.answer("⚠️ Ошибка: не указан chat_id группы в настройках.")
-        return
 
     record = await db.get_user_add_count(group_id, user_id)
     added: int = record["add_user_count"] if record else 0
@@ -168,7 +166,8 @@ async def check_group_members(call: types.CallbackQuery, state: FSMContext) -> N
     if added < required_members:
         await call.message.answer(
             f"❌ Добавлено: <b>{added}</b> из <b>{required_members}</b>.\n"
-            f"Нужно ещё <b>{required_members - added}</b> человек(а).",
+            f"Нужно ещё <b>{required_members - added}</b> человек(а).\n\n"
+            "ℹ️ После каждой выплаты счёт начинается заново.",
             parse_mode="HTML",
         )
         return
