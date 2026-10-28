@@ -79,6 +79,8 @@ async def database_connected() -> None:
     await db.add_invite_link_column()
     await db.add_language_column()
     await db.add_users_created_at_column()
+    # Защита от двойного начисления за одного приглашённого
+    await db.ensure_unique_invited_members()
 
     logger.info("✅ Все таблицы проверены и готовы.")
 
