@@ -1,0 +1,13 @@
+channels:
+- '@restojobs'
+invited_credit: 500
+payment_channel: https://t.me/+b6fm2o51j1FkNWI6
+subcr_channel: https://t.me/restojobs
+subcr_chat_id: -1002655032722
+group_member_count: 5
+min_balance: 50000
+max_withdraw: 100000
+vote_credit: 500
+url: ''
+support: '@affairme'
+antispam_referral_limit: 100

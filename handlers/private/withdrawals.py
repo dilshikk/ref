@@ -1,0 +1,326 @@
+# /www/wwwroot/uz_ibot/handlers/private/withdrawals.py
+import asyncio
+import random
+from weakref import WeakValueDictionary
+
+from aiogram import Router, types, F
+from aiogram.fsm.context import FSMContext
+from loguru import logger
+
+from filters import private_only
+from data.config import ADMINS, url_yaml
+from loader import db
+from states.flows import WithdrawalFlow
+from services.activity import activity_service
+from services.audit_log import audit_log_service
+
+router = private_only(Router(name="private.withdrawals"))
+
+# ✅ WeakValueDictionary — неактивные локи удаляются автоматически
+user_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
+
+
+# ======================================================
+# 1. Вывести средства → проверка баланса
+# ======================================================
+async def _do_withdraw(user_id: int, reply_target: types.Message, state: FSMContext) -> None:
+    """
+    user_id      — Telegram ID пользователя (всегда явно передаём)
+    reply_target — сообщение для ответа (может быть call.message)
+    """
+    lock = user_locks.get(user_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        user_locks[user_id] = lock
+
+    if lock.locked():
+        return
+
+    async with lock:
+        try:
+            record = await db.get_user_invited_count(user_id)
+            invited_count = record["current_count"] if record else 0
+
+            min_balance: int = url_yaml.get("min_balance", 0)
+            max_withdraw: int = url_yaml.get("max_withdraw", 9_999_999)
+            invited_credit: int = url_yaml.get("invited_credit", 1)
+            balance = invited_count * invited_credit
+
+            if balance <= 0:
+                await reply_target.answer(
+                    "😕 <b>У вас пока нет доступных средств.</b>\n\n"
+                    "💸 Приглашайте друзей и зарабатывайте.",
+                    parse_mode="HTML",
+                )
+                return
+
+            if balance < min_balance:
+                await reply_target.answer(
+                    f"⚠️ Недостаточно средств для вывода.\n\n"
+                    f"💵 Баланс: <b>{balance}</b> сум\n"
+                    f"📈 Минимум: <b>{min_balance}</b> сум\n"
+                    f"➕ Не хватает: <b>{min_balance - balance}</b> сум",
+                    parse_mode="HTML",
+                )
+                return
+
+            withdraw_amount = min(balance, max_withdraw)
+
+            if balance > max_withdraw:
+                await reply_target.answer(
+                    f"⚠️ Максимальный лимит вывода — <b>{max_withdraw}</b> сум.\n"
+                    f"📈 Ваш баланс: <b>{balance}</b> сум.",
+                    parse_mode="HTML",
+                )
+
+            markup = types.InlineKeyboardMarkup(inline_keyboard=[[
+                types.InlineKeyboardButton(text="✅ Продолжить", callback_data="withdraw_continue")
+            ]])
+            await state.update_data(balance=withdraw_amount)
+            await reply_target.answer(
+                f"💰 Сумма к выводу: <b>{withdraw_amount}</b> сум\n"
+                "Нажмите <b>Продолжить</b>, чтобы перейти к оформлению. 👇",
+                reply_markup=markup,
+                parse_mode="HTML",
+            )
+
+        except Exception as e:
+            logger.error(f"Ошибка _do_withdraw для user={user_id}: {e}")
+
+
+@router.message(F.text == "💸 Вывести средства")
+async def start_withdraw_message(message: types.Message, state: FSMContext) -> None:
+    # ✅ user_id берётся из message.from_user напрямую
+    await _do_withdraw(message.from_user.id, message, state)
+
+
+@router.callback_query(F.data == "go_withdraw")
+async def start_withdraw_callback(call: types.CallbackQuery, state: FSMContext) -> None:
+    await call.answer()  # ✅ убираем спиннер
+    # ✅ user_id берётся из call.from_user, не из call.message.from_user
+    await _do_withdraw(call.from_user.id, call.message, state)
+
+
+# ======================================================
+# 2. Капча
+# ======================================================
+@router.callback_query(F.data == "withdraw_continue")
+async def ask_captcha(call: types.CallbackQuery, state: FSMContext) -> None:
+    await call.answer()
+    await call.message.delete()
+    a, b = random.randint(1, 9), random.randint(1, 9)
+    await state.update_data(captcha=a + b)
+    await call.message.answer(
+        f"🧩 Для безопасности ответьте: <b>{a} + {b}</b> = ?",
+        parse_mode="HTML",
+    )
+    await state.set_state(WithdrawalFlow.CAPTCHA)
+
+
+@router.message(WithdrawalFlow.CAPTCHA)
+async def check_captcha(message: types.Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if not message.text.isdigit() or int(message.text) != data.get("captcha"):
+        await message.reply("❌ Неверно! Попробуйте ещё раз.")
+        return
+
+    required_members: int = url_yaml.get("group_member_count", 3)
+    group_link: str = url_yaml.get("subcr_channel", "")
+
+    markup = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="👥 Перейти в группу", url=group_link)],
+        [types.InlineKeyboardButton(text="✅ Я добавил(а)", callback_data="check_group_members")],
+    ])
+    await message.answer(
+        f"📢 Добавьте <b>{required_members}</b> участников в группу, "
+        "затем нажмите «✅ Я добавил(а)».",
+        parse_mode="HTML",
+        reply_markup=markup,
+    )
+    await state.set_state(WithdrawalFlow.CARD)
+
+
+# ======================================================
+# 3. Проверка добавленных участников
+# ======================================================
+@router.callback_query(F.data == "check_group_members", WithdrawalFlow.CARD)
+async def check_group_members(call: types.CallbackQuery, state: FSMContext) -> None:
+    await call.answer()
+    user_id = call.from_user.id
+    group_id = url_yaml.get("subcr_chat_id")
+    required_members: int = url_yaml.get("group_member_count", 3)
+
+    if not group_id:
+        await call.message.answer("⚠️ Ошибка: не указан chat_id группы в настройках.")
+        return
+
+    record = await db.get_user_add_count(group_id, user_id)
+    added: int = record["add_user_count"] if record else 0
+
+    if added < required_members:
+        await call.message.answer(
+            f"❌ Добавлено: <b>{added}</b> из <b>{required_members}</b>.\n"
+            f"Нужно ещё <b>{required_members - added}</b> человек(а).",
+            parse_mode="HTML",
+        )
+        return
+
+    markup = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="💳 На карту", callback_data="withdraw_card")],
+        [types.InlineKeyboardButton(text="📱 На телефон", callback_data="withdraw_phone")],
+    ])
+    await call.message.answer(
+        f"✅ Отлично! Добавлено <b>{added}</b> участников.\n\n"
+        "💸 Выберите способ вывода:",
+        parse_mode="HTML",
+        reply_markup=markup,
+    )
+
+
+# ======================================================
+# 4. Выбор способа вывода
+# ======================================================
+@router.callback_query(F.data == "withdraw_card")
+async def withdraw_card(call: types.CallbackQuery, state: FSMContext) -> None:
+    await call.answer()
+    await state.update_data(withdraw_type="card")
+    await call.message.answer("💳 Введите номер карты (16 цифр):")
+    await state.set_state(WithdrawalFlow.CARD_NUMBER)
+
+
+@router.callback_query(F.data == "withdraw_phone")
+async def withdraw_phone(call: types.CallbackQuery, state: FSMContext) -> None:
+    await call.answer()
+    await state.update_data(withdraw_type="phone")
+    await call.message.answer("📱 Введите номер телефона (+998XXXXXXXXX или 998XXXXXXXXX):")
+    await state.set_state(WithdrawalFlow.CARD_NUMBER)
+
+
+# ======================================================
+# 5. Ввод реквизитов
+# ======================================================
+@router.message(WithdrawalFlow.CARD_NUMBER)
+async def get_card_number(message: types.Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    raw = message.text.strip().replace(" ", "")
+    withdraw_type = data.get("withdraw_type")
+
+    if withdraw_type == "card":
+        if not raw.isdigit() or len(raw) != 16:
+            await message.reply("⚠️ Введите корректный номер карты (16 цифр).")
+            return
+        await state.update_data(payment_info=raw)
+        await message.answer("👤 Введите имя держателя карты (Имя Фамилия):")
+        await state.set_state(WithdrawalFlow.CARD_HOLDER)
+    else:
+        is_with_plus = raw.startswith("+") and raw[1:].isdigit() and len(raw) == 13
+        is_without_plus = raw.isdigit() and len(raw) == 12
+        if not (is_with_plus or is_without_plus):
+            await message.reply("⚠️ Введите телефон в формате +998XXXXXXXXX или 998XXXXXXXXX")
+            return
+        await state.update_data(payment_info=raw, card_holder="—")
+        await _show_confirm(message, state)
+
+
+@router.message(WithdrawalFlow.CARD_HOLDER)
+async def get_card_holder(message: types.Message, state: FSMContext) -> None:
+    name = message.text.strip()
+    if len(name.split()) < 2:
+        await message.reply("⚠️ Введите полное имя (Имя Фамилия).")
+        return
+    await state.update_data(card_holder=name)
+    await _show_confirm(message, state)
+
+
+async def _show_confirm(message: types.Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    markup = types.InlineKeyboardMarkup(inline_keyboard=[[
+        types.InlineKeyboardButton(text="✅ Подтвердить", callback_data="confirm_withdraw"),
+        types.InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_withdraw"),
+    ]])
+    await message.answer(
+        f"📋 <b>Проверьте данные:</b>\n\n"
+        f"💰 Сумма: <b>{data.get('balance')}</b> сум\n"
+        f"💳 Реквизиты: <code>{data.get('payment_info')}</code>\n"
+        f"👤 Держатель: <b>{data.get('card_holder', '—')}</b>",
+        parse_mode="HTML",
+        reply_markup=markup,
+    )
+    await state.set_state(WithdrawalFlow.END)
+
+
+# ======================================================
+# 6. Подтверждение → БД + уведомление админам
+# ======================================================
+@router.callback_query(F.data == "confirm_withdraw", WithdrawalFlow.END)
+async def confirm_withdraw(call: types.CallbackQuery, state: FSMContext) -> None:
+    await call.answer()  # ✅ убираем спиннер
+    data = await state.get_data()
+    user_id = call.from_user.id
+
+    existing = await db.get_pending_or_today_payout(user_id)
+    if existing:
+        await call.message.answer(
+            "⚠️ Вы уже подавали заявку на вывод сегодня.\n"
+            "Повторная заявка возможна через 24 часа."
+        )
+        await state.clear()
+        return
+
+    balance = data.get("balance")
+    payment_info = data.get("payment_info")
+    card_holder = data.get("card_holder", "—")
+
+    await db.add_payout_request(
+        user_id=user_id,
+        full_name=call.from_user.full_name,
+        username=call.from_user.username or "—",
+        card_number=payment_info,
+        amount=balance,
+    )
+    await audit_log_service.record_user_action(
+        actor_id=user_id,
+        action="withdrawal_requested",
+        entity_type="payout_request",
+        entity_id=user_id,
+        new_value={"amount": balance, "payment_info": payment_info, "card_holder": card_holder},
+        payload={"withdraw_type": data.get("withdraw_type")},
+    )
+    await activity_service.record(
+        user_id=user_id,
+        event="withdrawal_requested",
+        chat_id=call.message.chat.id if call.message else None,
+        session_id=call.id,
+        payload={"amount": balance},
+    )
+
+    await call.message.edit_text(
+        "✅ Заявка на вывод отправлена!\nОжидайте ответа администратора.",
+        parse_mode="HTML",
+    )
+    await state.clear()
+
+    for admin in ADMINS:
+        try:
+            await call.bot.send_message(
+                admin,
+                f"📢 <b>Новая заявка на вывод</b>\n\n"
+                f"👤 <a href='tg://user?id={user_id}'>{call.from_user.full_name}</a>\n"
+                f"🆔 ID: <code>{user_id}</code>\n"
+                f"💰 Сумма: <b>{balance}</b> сум\n"
+                f"💳 Реквизиты: <code>{payment_info}</code>\n"
+                f"👤 Держатель: {card_holder}",
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось уведомить админа {admin}: {e}")
+
+
+# ======================================================
+# 7. Отмена
+# ======================================================
+@router.callback_query(F.data == "cancel_withdraw")
+async def cancel_withdraw(call: types.CallbackQuery, state: FSMContext) -> None:
+    await call.answer()
+    await state.clear()
+    await call.message.edit_text("❌ Действие отменено.")

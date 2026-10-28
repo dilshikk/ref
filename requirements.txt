@@ -1,0 +1,11 @@
+# Bot framework
+aiogram==3.29.1
+
+# Database
+SQLAlchemy==2.0.32
+asyncpg==0.31.0
+
+# Config and logging
+environs==15.0.1
+PyYAML==6.0.3
+loguru==0.7.3
