@@ -22,8 +22,8 @@ PAGE_SIZE = 10
 # ======================================================
 
 def profile_text(p) -> str:
-    invited_credit = url_yaml.get("invited_credit", 0)
-    balance = p["current_count"] * invited_credit
+    # Баланс хранится в деньгах: смена цены за реферала его не пересчитывает
+    balance = int(p.get("balance_sum") or 0)
     blocked = "🚫 Заблокирован" if p["is_blocked"] else "✅ Активен"
     username = f"@{p['username']}" if p["username"] else "—"
     created_at = p["created_at"].strftime("%d.%m.%Y %H:%M") if p.get("created_at") else "—"
@@ -247,8 +247,9 @@ async def add_balance_process(message: types.Message, state: FSMContext) -> None
     before_current = before["current_count"] if before else 0
     before_history = before["history_count"] if before else 0
 
-    await db.add_balance(telegram_id, amount)
-    invited_credit: int = url_yaml.get("invited_credit", 0)
+    # Цена фиксируется в момент начисления
+    invited_credit: int = int(url_yaml.get("invited_credit", 0) or 0)
+    await db.add_balance(telegram_id, amount, price=invited_credit)
     after_current = before_current + amount
     after_history = before_history + amount
     await audit_log_service.record_admin_action(
@@ -306,8 +307,11 @@ async def reset_balance_execute(call: types.CallbackQuery) -> None:
         action="admin_balance_reset",
         entity_type="user",
         entity_id=telegram_id,
-        old_value={"current_count": before["current_count"] if before else 0},
-        new_value={"current_count": 0},
+        old_value={
+            "current_count": before["current_count"] if before else 0,
+            "balance_sum": int(before["balance_sum"] or 0) if before else 0,
+        },
+        new_value={"current_count": 0, "balance_sum": 0},
         payload={"reason": "admin_reset"},
     )
     await call.answer("✅ Баланс обнулён.", show_alert=True)
