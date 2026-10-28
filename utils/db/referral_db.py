@@ -9,13 +9,30 @@
 - get_payout_approval_state: почему одобрение не прошло — для сообщения админу.
 - referral_holds: вступления сверх антифрод-лимита больше не теряются, а ждут
   решения администратора (/holds).
+- _database_url: строка подключения собирается через URL.create (#21).
 """
 from __future__ import annotations
+
+from sqlalchemy.engine import URL
 
 from utils.db.safe_db import SafeDatabase
 
 
 class ReferralDatabase(SafeDatabase):
+    def _database_url(self) -> URL:
+        """
+        Раньше строка собиралась f-строкой, и пароль с «@», «/», «:» или «#»
+        ломал подключение. URL.create экранирует каждый компонент сам (#21).
+        """
+        return URL.create(
+            drivername="postgresql+asyncpg",
+            username=self.user,
+            password=self.password or None,
+            host=self.host,
+            port=self.port,
+            database=self.db_name,
+        )
+
     async def approve_payout_if_pending(
         self,
         request_id: int,
