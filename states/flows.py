@@ -39,6 +39,7 @@ class ReferralFlow(StatesGroup):
 class WithdrawalFlow(StatesGroup):
     CARD = State()
     CAPTCHA = State()
+    METHOD = State()  # выбор способа вывода — только после проверки участников
     CARD_NUMBER = State()
     CARD_HOLDER = State()
     END = State()
