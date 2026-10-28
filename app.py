@@ -1,6 +1,5 @@
 # /www/wwwroot/uz_ibot/app.py
 import asyncio
-import traceback
 
 from aiogram import Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -11,6 +10,7 @@ from loader import db, bot
 from middlewares.antispam import SmartRateLimiter
 from middlewares.callback_answer import CallbackAutoAnswerMiddleware
 from services.audit_log import audit_log_service
+from services.error_notify import notify_admins_about_error
 
 
 def _is_network_resolution_error(error: Exception) -> bool:
@@ -32,6 +32,7 @@ def setup_middlewares(dispatcher: Dispatcher) -> None:
     from middlewares.logger import ActionLoggerMiddleware
     from middlewares.blocked import BlockedUserMiddleware
     from middlewares.subscription import SubscriptionMiddleware
+    from middlewares.text_input import TextInputGuardMiddleware
 
     action_logger = ActionLoggerMiddleware()
     blocked_guard = BlockedUserMiddleware()
@@ -44,6 +45,9 @@ def setup_middlewares(dispatcher: Dispatcher) -> None:
     # Без подписки на обязательные каналы бот не работает (кроме /start и «Я подписался»)
     dispatcher.message.middleware(subscription_guard)
     dispatcher.callback_query.middleware(subscription_guard)
+
+    # Стикер/фото в форме, где нужен текст, больше не роняет обработчик
+    dispatcher.message.middleware(TextInputGuardMiddleware())
 
     # Прежний ThrottlingMiddleware убран: он дублировал SmartRateLimiter и отвечал
     # «Слишком много запросов» на быстрые ответы в формах, теряя их.
@@ -88,6 +92,8 @@ async def database_connected() -> None:
     await db.add_users_created_at_column()
     # Защита от двойного начисления за одного приглашённого
     await db.ensure_unique_invited_members()
+    # Баланс в деньгах: смена цены за реферала не пересчитывает старые балансы
+    await db.ensure_money_columns()
 
     logger.info("✅ Все таблицы проверены и готовы.")
 
@@ -148,21 +154,11 @@ async def aiogram_on_shutdown_polling(dispatcher: Dispatcher) -> None:
 
 
 async def send_error_to_admin(error: Exception) -> None:
-    """Отправляет traceback ошибки всем администраторам."""
+    """Отправляет критическую ошибку всем администраторам."""
     if _is_network_resolution_error(error):
         logger.warning("Сеть/DNS недоступны: пропускаю отправку ошибки админам в Telegram.")
         return
-
-    trace_text = "".join(traceback.format_exception(type(error), error, error.__traceback__))
-    error_text = (
-        f"⚠️ <b>Критическая ошибка в боте!</b>\n\n"
-        f"<code>{trace_text}</code>"
-    )
-    for admin_id in ADMINS:
-        try:
-            await bot.send_message(admin_id, error_text, parse_mode="HTML")
-        except Exception as e:
-            logger.error(f"Не удалось отправить ошибку админу {admin_id}: {e}")
+    await notify_admins_about_error(bot, error, title="Критическая ошибка: бот остановлен")
 
 
 async def run_polling() -> None:
@@ -189,7 +185,7 @@ async def run_polling() -> None:
         await dispatcher.start_polling(
             bot,
             allowed_updates=["message", "callback_query", "chat_member", "my_chat_member", "poll_answer"],
-            close_bot_session=True,
+            close_bot_session=False,  # сессия нужна, чтобы после падения успеть сообщить админу
         )
     except Exception as e:
         logger.exception("💥 Критическая ошибка в polling!")

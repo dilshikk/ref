@@ -21,12 +21,10 @@ async def balance(message: types.Message) -> None:
         await message.answer("⚠️ Не удалось загрузить баланс. Попробуйте позже.")
         return
 
-    current_count: int = record["current_count"] if record else 0
-    history_count: int = record["history_count"] if record else 0
-    invited_credit: int = url_yaml.get("invited_credit", 0)
+    # Деньги берём из базы как есть: смена цены за реферала их не пересчитывает
+    balance_sum: int = int(record["balance_sum"] or 0) if record else 0
+    total_earned: int = int(record["earned_sum"] or 0) if record else 0
     min_balance: int = url_yaml.get("min_balance", 0)
-
-    total_earned: int = history_count * invited_credit
 
     # ✅ Защита от None в поле amount
     pending: int = int(sum(
@@ -35,7 +33,7 @@ async def balance(message: types.Message) -> None:
 
     # Сумма заявки списывается с баланса только при одобрении, поэтому
     # вычитаем ожидающие выплаты, чтобы не показывать одни деньги дважды.
-    available: int = max(0, current_count * invited_credit - pending)
+    available: int = max(0, balance_sum - pending)
 
     # Кнопку вывода не показываем, пока есть заявка в ожидании:
     # повторная заявка всё равно будет отклонена.

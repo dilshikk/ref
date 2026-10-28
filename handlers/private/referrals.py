@@ -78,7 +78,6 @@ async def top_referrals(message: types.Message) -> None:
         await message.answer("😔 Пока нет данных.")
         return
 
-    invited_credit: int = url_yaml.get("invited_credit", 0)
     lines: list[str] = []
 
     for i, row in enumerate(rows[:_TOP_LIMIT]):
@@ -87,7 +86,7 @@ async def top_referrals(message: types.Message) -> None:
         count: int = row["history_count"]
         lines.append(
             f"{_MEDALS[i]} {name} {username_part}\n"
-            f"   👥 {count} чел. | 💰 {count * invited_credit} сум"
+            f"   👥 {count} чел. | 💰 {int(row.get('earned_sum') or 0)} сум"
         )
 
     await message.answer(
@@ -120,12 +119,12 @@ async def my_invited(message: types.Message) -> None:
 
     current_count: int = record["current_count"] if record else 0
     history_count: int = record["history_count"] if record else 0
-    invited_credit: int = url_yaml.get("invited_credit", 0)
+    earned_sum: int = int(record["earned_sum"] or 0) if record else 0
 
     await message.answer(
         f"👥 <b>Ваши приглашённые</b>\n\n"
         f"✅ Активных: <b>{current_count}</b>\n"
         f"📊 Всего приглашено: <b>{history_count}</b>\n"
-        f"💰 Заработано всего: <b>{history_count * invited_credit}</b> сум",
+        f"💰 Заработано всего: <b>{earned_sum}</b> сум",
         parse_mode="HTML",
     )

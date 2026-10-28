@@ -120,13 +120,15 @@ async def credit_referral(
                 logger.error(f"Не удалось уведомить админа {admin_id}: {e}")
         return False
 
-    credited = await db.credit_referral_once(referrer_id, new_user_id)
+    # Цена фиксируется в момент начисления: если админ потом её поменяет,
+    # уже заработанные деньги не пересчитаются
+    invited_credit = int(url_yaml.get("invited_credit", 0) or 0)
+    credited = await db.credit_referral_once(referrer_id, new_user_id, reward=invited_credit)
     if not credited:
         # Повторное событие от Telegram или параллельная обработка — второй раз не начисляем
         logger.debug(f"Реферал {new_user_id} уже засчитан (повторное событие), пропуск.")
         return False
 
-    invited_credit = url_yaml.get("invited_credit", 0)
     try:
         await bot.send_message(
             referrer_id,
