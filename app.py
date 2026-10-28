@@ -85,6 +85,8 @@ async def database_connected() -> None:
     await db.create_table_poll_vote_answers()
     # Кому уже выдана награда за голос (одна на пользователя и вопрос)
     await db.create_table_poll_vote_rewards()
+    # Кто кого добавил в группу вручную: один человек засчитывается один раз
+    await db.create_table_group_manual_adds()
 
     # Миграции
     await db.add_is_blocked_column()
@@ -119,7 +121,9 @@ async def aiogram_on_startup_polling(dispatcher: Dispatcher) -> None:
     )
 
     logger.info("Starting polling")
-    await bot.delete_webhook(drop_pending_updates=True)
+    # Накопившиеся за время простоя события НЕ выбрасываем: среди них вступления
+    # в группу по реферальным ссылкам — их потеря означает потерю начислений.
+    await bot.delete_webhook(drop_pending_updates=False)
     await setup_aiogram(dispatcher=dispatcher)
     await start_broadcast_scheduler()
     await on_startup_notify(bot=bot)
