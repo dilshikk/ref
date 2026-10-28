@@ -2,6 +2,7 @@
 from aiogram import Router, types, F
 from filters import private_only
 from loader import db
+from utils.payment_details import mask
 
 router = private_only(Router(name="private.payout_history"))
 
@@ -18,7 +19,7 @@ async def payout_history(message: types.Message):
         status = status_map.get(row["status"], row["status"])
         text += (
             f"🆔 #{row['id']} | {status}\n"
-            f"💰 {row['amount']} сум | 💳 <code>{row['card_number']}</code>\n"
+            f"💰 {row['amount']} сум | 💳 <code>{mask(row['card_number'])}</code>\n"
             f"📅 {str(row['created_at'])[:16]}\n\n"
         )
     await message.answer(text, parse_mode="HTML")
