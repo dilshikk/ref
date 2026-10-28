@@ -101,6 +101,8 @@ async def database_connected() -> None:
     await db.ensure_money_columns()
     # Снятие начисления, если приглашённый вышел из группы
     await db.ensure_referral_reversal_columns()
+    # Реквизиты выплат: колонка TEXT и шифрование старых заявок (#20)
+    await db.ensure_payout_card_encryption()
 
     logger.info("✅ Все таблицы проверены и готовы.")
 
