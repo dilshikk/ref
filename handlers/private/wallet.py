@@ -3,7 +3,7 @@ from aiogram import Router, types, F
 from loguru import logger
 
 from filters import private_only
-from data.config import url_yaml
+from data.settings import get_settings
 from loader import db
 
 router = private_only(Router(name="private.wallet"))
@@ -24,7 +24,7 @@ async def balance(message: types.Message) -> None:
     # Деньги берём из базы как есть: смена цены за реферала их не пересчитывает
     balance_sum: int = int(record["balance_sum"] or 0) if record else 0
     total_earned: int = int(record["earned_sum"] or 0) if record else 0
-    min_balance: int = url_yaml.get("min_balance", 0)
+    min_balance = get_settings().min_balance
 
     # ✅ Защита от None в поле amount
     pending: int = int(sum(

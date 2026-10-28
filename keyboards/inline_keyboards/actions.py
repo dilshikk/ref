@@ -3,7 +3,7 @@ from typing import Optional
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-from data.config import url_yaml
+from data.settings import get_settings, is_http_url
 from loader import db
 
 
@@ -34,8 +34,8 @@ def action_keyboard(key: str) -> InlineKeyboardMarkup:
 
 # 🗳 Кнопка "Проголосовать" (ссылка)
 def url_button() -> Optional[InlineKeyboardMarkup]:
-    url = str(url_yaml.get("url") or "").strip()
-    if not (url.startswith("http://") or url.startswith("https://")):
+    url = get_settings().vote_url
+    if not is_http_url(url):
         return None
 
     return InlineKeyboardMarkup(
@@ -45,37 +45,24 @@ def url_button() -> Optional[InlineKeyboardMarkup]:
     )
 
 
-async def subscribe_keyboard_invited(user_id: int) -> InlineKeyboardMarkup:
+async def _channel_buttons() -> list[list[InlineKeyboardButton]]:
     channels = await db.get_all_channels()
-    inline_keyboard = []
-
+    rows: list[list[InlineKeyboardButton]] = []
     for index, channel in enumerate(channels, start=1):
         link = channel["link"]
         if not link or not link.startswith("http"):
             continue  # пропускаем каналы без валидной ссылки
-        inline_keyboard.append([
-            InlineKeyboardButton(text=f"📢 Канал {index}", url=link)
-        ])
+        rows.append([InlineKeyboardButton(text=f"📢 Канал {index}", url=link)])
+    return rows
 
-    inline_keyboard.append([
-        InlineKeyboardButton(text="✅ Я подписался", callback_data=f"subscribe_true_{user_id}")
-    ])
-    return InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
+
+async def subscribe_keyboard_invited(user_id: int) -> InlineKeyboardMarkup:
+    rows = await _channel_buttons()
+    rows.append([InlineKeyboardButton(text="✅ Я подписался", callback_data=f"subscribe_true_{user_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def subscribe_keyboard() -> InlineKeyboardMarkup:
-    channels = await db.get_all_channels()
-    inline_keyboard = []
-
-    for index, channel in enumerate(channels, start=1):
-        link = channel["link"]
-        if not link or not link.startswith("http"):
-            continue
-        inline_keyboard.append([
-            InlineKeyboardButton(text=f"📢 Канал {index}", url=link)
-        ])
-
-    inline_keyboard.append([
-        InlineKeyboardButton(text="✅ Я подписался", callback_data="subscribe_true")
-    ])
-    return InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
+    rows = await _channel_buttons()
+    rows.append([InlineKeyboardButton(text="✅ Я подписался", callback_data="subscribe_true")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)

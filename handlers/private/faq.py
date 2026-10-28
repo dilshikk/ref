@@ -1,36 +1,19 @@
 # /www/wwwroot/uz_ibot/handlers/private/faq.py
-from aiogram import Router, types, F
+from aiogram import Router, types
 from aiogram.filters import Command
-from loguru import logger
 
 from filters import private_only
-from data.config import url_yaml
-from keyboards.reply_keyboards.menu import menu_kb
+from data.settings import get_settings
 
 router = private_only(Router(name="private.faq"))
 
-
-@router.message(Command("start"))
-async def start_command(message: types.Message) -> None:
-    invited_credit: int = url_yaml.get("invited_credit", 0)
-    min_balance: int = url_yaml.get("min_balance", 0)
-
-    await message.answer(
-        f"👋 Привет, <b>{message.from_user.first_name}</b>!\n\n"
-        f"🤑 Зарабатывай деньги, приглашая друзей!\n\n"
-        f"💡 За каждого приглашённого друга — <b>{invited_credit} сум</b>\n"
-        f"💸 Минимум для вывода — <b>{min_balance} сум</b>\n\n"
-        f"👇 Выбери действие в меню:",
-        parse_mode="HTML",
-        reply_markup=menu_kb(),
-    )
+# Обработчик /start отсюда убран: onboarding подключён раньше и всегда
+# забирал команду себе, так что этот код никогда не выполнялся.
 
 
 @router.message(Command("help"))
 async def help_command(message: types.Message) -> None:
-    invited_credit: int = url_yaml.get("invited_credit", 0)
-    min_balance: int = url_yaml.get("min_balance", 0)
-    group_member_count: int = url_yaml.get("group_member_count", 3)
+    settings = get_settings()
 
     text = (
         "📖 <b>Как работает бот?</b>\n\n"
@@ -39,14 +22,14 @@ async def help_command(message: types.Message) -> None:
         "   Нажми «🔗 Моя реферальная ссылка» — получишь личную инвайт-ссылку в группу\n\n"
 
         "2️⃣ <b>Приглашай друзей</b>\n"
-        f"   Отправь ссылку друзьям. За каждого вступившего — <b>+{invited_credit} сум</b>\n\n"
+        f"   Отправь ссылку друзьям. За каждого вступившего — <b>+{settings.invited_credit} сум</b>\n\n"
 
         "3️⃣ <b>Следи за балансом</b>\n"
         "   Нажми «💰 Баланс» — увидишь сколько заработал\n\n"
 
         "4️⃣ <b>Выводи деньги</b>\n"
-        f"   Минимум для вывода — <b>{min_balance} сум</b>\n"
-        f"   Перед выводом нужно добавить <b>{group_member_count}</b> участников в группу\n"
+        f"   Минимум для вывода — <b>{settings.min_balance} сум</b>\n"
+        f"   Перед выводом нужно добавить <b>{settings.group_member_count}</b> участников в группу\n"
         "   Вывод на карту или телефон\n\n"
 
         "🏆 <b>Топ рефералов</b>\n"
