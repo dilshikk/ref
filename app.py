@@ -53,22 +53,15 @@ def setup_middlewares(dispatcher: Dispatcher) -> None:
     # Стикер/фото в форме, где нужен текст, больше не роняет обработчик
     dispatcher.message.middleware(TextInputGuardMiddleware())
 
-    # Прежний ThrottlingMiddleware убран: он дублировал SmartRateLimiter и отвечал
-    # «Слишком много запросов» на быстрые ответы в формах, теряя их.
     dispatcher.message.middleware(action_logger)
     dispatcher.callback_query.middleware(action_logger)
 
 
-def setup_filters(dispatcher: Dispatcher) -> None:
-    """Router-specific filters are declared next to their handlers."""
-    return None
-
-
 async def setup_aiogram(dispatcher: Dispatcher) -> None:
+    # Фильтры объявлены рядом со своими хэндлерами, отдельная настройка не нужна
     logger.info("Configuring aiogram")
     setup_handlers(dispatcher=dispatcher)
     setup_middlewares(dispatcher=dispatcher)
-    setup_filters(dispatcher=dispatcher)
     logger.info("Configured aiogram")
 
 
