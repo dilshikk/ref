@@ -7,7 +7,7 @@ from loguru import logger
 
 from data.config import ADMINS, url_yaml
 from filters import private_only
-from filters.admin import IsBotAdminFilter
+from filters.admin import IsBotAdminFilter, IsMoneyAdmin
 from loader import db, bot
 from states.flows import UserManagementFlow
 from services.audit_log import audit_log_service
@@ -216,10 +216,10 @@ async def show_payout_history(call: types.CallbackQuery) -> None:
 
 
 # ======================================================
-# 5️⃣ Начислить баланс
+# 5️⃣ Начислить баланс (только MONEY_ADMINS, #23)
 # ======================================================
 
-@router.callback_query(F.data.startswith("umgmt_addbal_"), IsBotAdminFilter(ADMINS))
+@router.callback_query(F.data.startswith("umgmt_addbal_"), IsBotAdminFilter(ADMINS), IsMoneyAdmin())
 async def add_balance_start(call: types.CallbackQuery, state: FSMContext) -> None:
     await call.answer()  # ✅
     telegram_id = int(call.data.split("_")[2])
@@ -232,7 +232,7 @@ async def add_balance_start(call: types.CallbackQuery, state: FSMContext) -> Non
     )
 
 
-@router.message(UserManagementFlow.add_balance_input, IsBotAdminFilter(ADMINS))
+@router.message(UserManagementFlow.add_balance_input, IsBotAdminFilter(ADMINS), IsMoneyAdmin())
 async def add_balance_process(message: types.Message, state: FSMContext) -> None:
     if not message.text.isdigit() or int(message.text) <= 0:
         await message.answer("❌ Введите целое положительное число.")
@@ -278,10 +278,10 @@ async def add_balance_process(message: types.Message, state: FSMContext) -> None
 
 
 # ======================================================
-# 6️⃣ Обнулить баланс
+# 6️⃣ Обнулить баланс (только MONEY_ADMINS, #23)
 # ======================================================
 
-@router.callback_query(F.data.startswith("umgmt_reset_"), IsBotAdminFilter(ADMINS))
+@router.callback_query(F.data.startswith("umgmt_reset_"), IsBotAdminFilter(ADMINS), IsMoneyAdmin())
 async def reset_balance_confirm(call: types.CallbackQuery) -> None:
     await call.answer()  # ✅
     telegram_id = int(call.data.split("_")[2])
@@ -297,7 +297,7 @@ async def reset_balance_confirm(call: types.CallbackQuery) -> None:
     )
 
 
-@router.callback_query(F.data.startswith("umgmt_resetok_"), IsBotAdminFilter(ADMINS))
+@router.callback_query(F.data.startswith("umgmt_resetok_"), IsBotAdminFilter(ADMINS), IsMoneyAdmin())
 async def reset_balance_execute(call: types.CallbackQuery) -> None:
     telegram_id = int(call.data.split("_")[2])
     before = await db.get_user_invited_count(telegram_id)

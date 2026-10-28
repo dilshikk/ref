@@ -15,6 +15,8 @@ approved_/rejected_/payout_receipt_input из admin_panel больше не ср
 - выплата не одобряется, если баланс пользователя стал меньше суммы заявки или
   число добавленных участников стало меньше нормы (например, приглашённые вышли
   из группы). Проверка идёт в том же SQL, что и списание, — атомарно.
+- одобрять/отклонять выплаты может только MONEY_ADMINS (#23); остальным админам
+  отвечает money_guard, и до старых обработчиков admin_panel нажатие не доходит.
 """
 from typing import Any, cast
 
@@ -24,7 +26,7 @@ from loguru import logger
 
 from data.config import ADMINS, GROUP_ID, url_yaml
 from filters import private_only
-from filters.admin import IsBotAdminFilter
+from filters.admin import IsAdminWithoutMoneyRights, IsBotAdminFilter, IsMoneyAdmin
 from keyboards.reply_keyboards import finance_kb
 from loader import db
 from states.flows import AdminFlow
@@ -84,7 +86,21 @@ def _parse_req_id(data: str) -> int | None:
     return int(parts[2])
 
 
-@router.callback_query(F.data.startswith("approved_"), IsBotAdminFilter(ADMINS))
+# Денежные кнопки, которые может нажимать только MONEY_ADMINS (#23).
+_MONEY_CALLBACK_PREFIXES = ("approved_", "rejected_", "umgmt_addbal_", "umgmt_reset_", "umgmt_resetok_", "hold_ok_", "hold_no_")
+
+
+@router.callback_query(F.data.startswith(_MONEY_CALLBACK_PREFIXES), IsAdminWithoutMoneyRights())
+async def money_guard(call: types.CallbackQuery) -> None:
+    """
+    Обычный админ нажал денежную кнопку. Отвечаем здесь, чтобы нажатие не ушло
+    в старые обработчики admin_panel (они проверяют только ADMINS).
+    """
+    logger.warning(f"Админ {call.from_user.id} без прав MONEY_ADMIN нажал «{call.data}»")
+    await call.answer("⛔ Выплаты и балансы может менять только финансовый администратор.", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("approved_"), IsBotAdminFilter(ADMINS), IsMoneyAdmin())
 async def payment_confirmed(call: types.CallbackQuery, state: FSMContext) -> None:
     if not call.data or not call.message:
         return
@@ -117,7 +133,7 @@ async def payment_confirmed(call: types.CallbackQuery, state: FSMContext) -> Non
     await call.answer()
 
 
-@router.callback_query(F.data.startswith("rejected_"), IsBotAdminFilter(ADMINS))
+@router.callback_query(F.data.startswith("rejected_"), IsBotAdminFilter(ADMINS), IsMoneyAdmin())
 async def payment_canceled(call: types.CallbackQuery, state: FSMContext) -> None:
     if not call.data or not call.message:
         return
@@ -147,7 +163,7 @@ async def payment_canceled(call: types.CallbackQuery, state: FSMContext) -> None
         logger.warning(f"Не удалось уведомить пользователя об отклонении: {e}")
 
 
-@router.message(AdminFlow.payout_receipt_input, IsBotAdminFilter(ADMINS))
+@router.message(AdminFlow.payout_receipt_input, IsBotAdminFilter(ADMINS), IsMoneyAdmin())
 async def payout_finalize_with_receipt(message: types.Message, state: FSMContext) -> None:
     data = await state.get_data()
     req_id = int(data.get("payout_req_id") or 0)

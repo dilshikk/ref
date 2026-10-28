@@ -15,7 +15,7 @@ from loguru import logger
 from data.config import ADMINS, GROUP_ID
 from data.settings import get_settings
 from filters import private_only
-from filters.admin import IsBotAdminFilter
+from filters.admin import IsBotAdminFilter, IsMoneyAdmin
 from loader import db
 from services.audit_log import audit_log_service
 
@@ -77,7 +77,7 @@ async def _drop_buttons(call: types.CallbackQuery, note: str) -> None:
         pass
 
 
-@router.callback_query(F.data.startswith("hold_ok_"), IsBotAdminFilter(ADMINS))
+@router.callback_query(F.data.startswith("hold_ok_"), IsBotAdminFilter(ADMINS), IsMoneyAdmin())
 async def approve_holds(call: types.CallbackQuery) -> None:
     referrer_id = _parse_referrer(call.data or "")
     if referrer_id is None:
@@ -110,7 +110,7 @@ async def approve_holds(call: types.CallbackQuery) -> None:
         )
 
 
-@router.callback_query(F.data.startswith("hold_no_"), IsBotAdminFilter(ADMINS))
+@router.callback_query(F.data.startswith("hold_no_"), IsBotAdminFilter(ADMINS), IsMoneyAdmin())
 async def reject_holds(call: types.CallbackQuery) -> None:
     referrer_id = _parse_referrer(call.data or "")
     if referrer_id is None:

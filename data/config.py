@@ -17,6 +17,10 @@ ADMINS: list[int] = [int(a) for a in env.list("ADMINS")]
 # 💰 ID администратора, отвечающего за выплаты
 MONEY_ADMIN: int = env.int("MONEY_ADMIN")
 
+# 💰 Кто может одобрять/отклонять выплаты и менять балансы (#23).
+# Всегда MONEY_ADMIN; дополнительно — необязательный список MONEY_ADMINS через запятую.
+MONEY_ADMINS: list[int] = sorted({MONEY_ADMIN, *(int(a) for a in env.list("MONEY_ADMINS", []))})
+
 # 👥 ID группы, куда ведут реферальные инвайт-ссылки.
 # Это ЕДИНСТВЕННЫЙ источник ID группы: в ней же считаются «добавленные участники»
 # для вывода средств.
@@ -67,6 +71,16 @@ def _warn_group_mismatch() -> None:
 
 
 _warn_group_mismatch()
+
+
+def _warn_money_admin_not_admin() -> None:
+    """Без роли в ADMINS денежный админ не увидит админ-панель и заявки."""
+    missing = [a for a in MONEY_ADMINS if a not in ADMINS]
+    if missing:
+        logger.warning(f"⚠️ MONEY_ADMINS {missing} нет в ADMINS: они не увидят админ-панель и заявки на вывод.")
+
+
+_warn_money_admin_not_admin()
 
 
 def get_channels() -> list:
