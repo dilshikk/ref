@@ -307,11 +307,15 @@ async def on_user_join(event: types.ChatMemberUpdated) -> None:
     await _send_welcome_dm(user, group_id)
 
 
-@router.message(ChatGroupFilter())
-async def debug_all_messages(message: types.Message) -> None:
-    logger.warning(f"📨 Сообщение в группе: {message.text or '[без текста]'}")
+# Обработчика всех сообщений группы здесь больше нет: он стоял раньше
+# onboarding.group_router и забирал каждое сообщение себе, поэтому бот никогда
+# не отвечал в группе на «привет»/«спасибо», а лог засорялся предупреждениями.
 
 
 @router.my_chat_member(ChatGroupFilter())
-async def debug_my_chat_member(event: types.ChatMemberUpdated) -> None:
-    logger.warning(f"🤖 my_chat_member: {event.new_chat_member.status}")
+async def on_bot_status_change(event: types.ChatMemberUpdated) -> None:
+    # Добавление/удаление самого бота в группе — обычное событие, не предупреждение
+    logger.info(
+        f"🤖 Статус бота в чате {event.chat.id}: "
+        f"{event.old_chat_member.status} → {event.new_chat_member.status}"
+    )
