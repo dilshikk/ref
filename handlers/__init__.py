@@ -22,6 +22,11 @@ def setup_routers() -> Router:
 
     router = Router(name="handlers.root")
 
+    # Обработчик ошибок вешаем на КОРНЕВОЙ роутер. В aiogram 3 ошибки поднимаются
+    # только к родителям, поэтому в соседнем роутере error_router он не видел ошибок
+    # других обработчиков — админ о них не узнавал.
+    router.errors.register(error_router.MyErrorHandler)
+
     router.include_routers(
         # payout_guard стоит ПЕРЕД admin_panel: его исправленные обработчики
         # одобрения/отклонения выплат перехватывают старые из admin_panel
@@ -38,7 +43,6 @@ def setup_routers() -> Router:
         profile_settings.router,
         support.router,
         member_events.router,
-        error_router.router,
         onboarding.group_router,
         fallback.router,
     )
