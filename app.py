@@ -2,7 +2,6 @@
 import asyncio
 
 from aiogram import Dispatcher
-from aiogram.fsm.storage.memory import MemoryStorage
 from loguru import logger
 
 from data.config import ADMINS
@@ -11,6 +10,11 @@ from middlewares.antispam import SmartRateLimiter
 from middlewares.callback_answer import CallbackAutoAnswerMiddleware
 from services.audit_log import audit_log_service
 from services.error_notify import notify_admins_about_error
+from utils.fsm_storage import PostgresStorage
+
+# Состояния форм хранятся в базе: при перезапуске бота незаконченный
+# вывод средств или настройка в админке больше не теряются (раньше — MemoryStorage)
+fsm_storage = PostgresStorage(db)
 
 
 def _is_network_resolution_error(error: Exception) -> bool:
@@ -87,6 +91,8 @@ async def database_connected() -> None:
     await db.create_table_poll_vote_rewards()
     # Кто кого добавил в группу вручную: один человек засчитывается один раз
     await db.create_table_group_manual_adds()
+    # Состояния форм (переживают перезапуск)
+    await fsm_storage.create_table()
 
     # Миграции
     await db.add_is_blocked_column()
@@ -151,14 +157,15 @@ async def aiogram_on_shutdown_polling(dispatcher: Dispatcher) -> None:
         logger.warning(f"Не удалось записать bot_stop в аудит: {e}")
 
     try:
-        await db.close_pool()
-    except Exception as e:
-        logger.warning(f"Ошибка закрытия пула БД: {e}")
-
-    try:
         await dispatcher.storage.close()
     except Exception as e:
         logger.warning(f"Ошибка закрытия storage: {e}")
+
+    # База закрывается последней: хранилище форм работает через неё
+    try:
+        await db.close_pool()
+    except Exception as e:
+        logger.warning(f"Ошибка закрытия пула БД: {e}")
 
 
 async def send_error_to_admin(error: Exception) -> None:
@@ -175,7 +182,7 @@ async def run_polling() -> None:
     Вынесена отдельно, чтобы send_error_to_admin работал
     в том же event loop, что и bot — сессия ещё открыта.
     """
-    dispatcher = Dispatcher(storage=MemoryStorage())
+    dispatcher = Dispatcher(storage=fsm_storage)
 
     dispatcher.startup.register(aiogram_on_startup_polling)
     dispatcher.shutdown.register(aiogram_on_shutdown_polling)
