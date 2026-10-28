@@ -9,14 +9,12 @@ from aiogram.filters import BaseFilter
 from aiogram.types import Message, ChatMemberUpdated
 from loguru import logger
 
-from data.config import url_yaml, ADMINS, GROUP_ID
+from data.config import ADMINS, GROUP_ID
+from data.settings import get_settings
 from loader import db, bot
 
 router = Router(name="groups.member_events")
 
-_DEFAULT_ANTIFRAUD_LIMIT = 100
-# Сколько часов после вступления выход из группы отменяет начисление (пункт 8)
-_DEFAULT_REFERRAL_HOLD_HOURS = 72
 # Об одном и том же подозрительном пригласившем админы узнают не чаще раза в час
 _ANTIFRAUD_ALERT_COOLDOWN = 3600
 
@@ -28,11 +26,7 @@ _antifraud_alerts: dict[int, tuple[float, int]] = {}
 
 def _antifraud_limit() -> int:
     """Лимит рефералов в час из настроек админки (🚨 Антифрод лимит)."""
-    try:
-        value = int(url_yaml.get("antispam_referral_limit", _DEFAULT_ANTIFRAUD_LIMIT))
-    except (TypeError, ValueError):
-        return _DEFAULT_ANTIFRAUD_LIMIT
-    return value if value > 0 else _DEFAULT_ANTIFRAUD_LIMIT
+    return get_settings().antispam_referral_limit
 
 
 def _referral_hold_hours() -> int:
@@ -40,11 +34,7 @@ def _referral_hold_hours() -> int:
     referral_hold_hours в url.yml: если приглашённый вышел из группы в течение
     этого времени после вступления, начисление снимается. 0 — снимать всегда.
     """
-    try:
-        value = int(url_yaml.get("referral_hold_hours", _DEFAULT_REFERRAL_HOLD_HOURS))
-    except (TypeError, ValueError):
-        return _DEFAULT_REFERRAL_HOLD_HOURS
-    return max(0, value)
+    return get_settings().referral_hold_hours
 
 
 class ChatGroupFilter(BaseFilter):
@@ -79,7 +69,7 @@ async def _send_welcome_dm(user: types.User, group_id: int) -> None:
             f"👋 Привет, <b>{html.escape(user.full_name)}</b>!\n\n"
             f"Ты вступил в группу.\n\n"
             f"🤑 Приглашай друзей и получай по "
-            f"<b>{url_yaml.get('invited_credit', 0)}</b> сум за каждого!\n\n"
+            f"<b>{get_settings().invited_credit}</b> сум за каждого!\n\n"
             f"👇 Нажми кнопку чтобы запустить бота:",
             parse_mode="HTML",
             reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[[
@@ -191,7 +181,7 @@ async def credit_referral(
 
     # Цена фиксируется в момент начисления: если админ потом её поменяет,
     # уже заработанные деньги не пересчитаются
-    invited_credit = int(url_yaml.get("invited_credit", 0) or 0)
+    invited_credit = get_settings().invited_credit
     credited = await db.credit_referral_once(referrer_id, new_user_id, reward=invited_credit)
     if not credited:
         # Повторное событие от Telegram или параллельная обработка — второй раз не начисляем
