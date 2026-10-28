@@ -6,7 +6,8 @@ from loguru import logger
 
 from filters import private_only
 from filters.admin import IsBotAdminFilter
-from data.config import ADMINS, url_yaml
+from data.config import ADMINS
+from data.settings import get_settings
 from states.flows import SupportFlow, AdminFlow
 
 router = private_only(Router(name="private.support"))
@@ -34,7 +35,7 @@ def _support_preview(message: types.Message) -> str:
 
 @router.message(F.text == "📞 Поддержка")
 async def support(message: types.Message, state: FSMContext) -> None:
-    support_link: str | None = url_yaml.get("support")
+    support_link = get_settings().support
     extra = f"\n\nТакже можно написать напрямую: {support_link}" if support_link else ""
     await message.answer(
         "📞 <b>Служба поддержки</b>\n\n"
