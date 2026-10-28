@@ -1,0 +1,34 @@
+# Секреты и настройки НЕ попадают в образ: они подключаются при запуске
+# (.env — через env_file, url.yml — через volume в docker-compose.yml)
+.env
+.env.*
+!.env.example
+data/url.yml
+
+# Git и служебное
+.git
+.gitignore
+.dockerignore
+Dockerfile
+docker-compose.yml
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+venv/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Логи, локальные базы, IDE, ОС
+logs/
+*.log
+main.db
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
