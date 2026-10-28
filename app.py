@@ -92,6 +92,8 @@ async def database_connected() -> None:
     await db.add_users_created_at_column()
     # Защита от двойного начисления за одного приглашённого
     await db.ensure_unique_invited_members()
+    # Баланс в деньгах: смена цены за реферала не пересчитывает старые балансы
+    await db.ensure_money_columns()
 
     logger.info("✅ Все таблицы проверены и готовы.")
 
