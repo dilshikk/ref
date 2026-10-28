@@ -1,0 +1,28 @@
+# Запуск:   docker compose up -d --build
+# Логи:     docker compose logs -f bot
+#
+# Перед первым запуском на сервере:
+#   1) скопируйте .env.example -> .env и data/url.yml.example -> data/url.yml, заполните
+#   2) дайте пользователю контейнера право записи в url.yml (админка сохраняет туда тарифы):
+#        sudo chown 1000:1000 data/url.yml
+#   3) DB_HOST в .env: внутри контейнера "localhost" — это сам контейнер.
+#      Если PostgreSQL стоит на этом же сервере, укажите DB_HOST=host.docker.internal
+
+services:
+  bot:
+    build: .
+    container_name: ref_bot
+    # Автоперезапуск после падения и после перезагрузки сервера
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      # Настройки живут на сервере: изменения из админки не теряются при пересборке
+      - ./data/url.yml:/app/data/url.yml
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # Без ограничения docker logs со временем заполняют диск
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

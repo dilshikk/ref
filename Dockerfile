@@ -1,15 +1,25 @@
-# Используем легкий образ Python
 FROM python:3.11-slim
 
-# Устанавливаем рабочую директорию
+# Логи сразу в docker logs, без .pyc в контейнере
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
 WORKDIR /app
 
-# Копируем файл зависимостей и устанавливаем их
+# Отдельный пользователь без прав администратора.
+# UID 1000 фиксирован, чтобы на сервере можно было выдать ему права на url.yml
+RUN groupadd --gid 1000 bot \
+    && useradd --uid 1000 --gid bot --no-create-home --shell /usr/sbin/nologin bot
+
+# Зависимости отдельным слоем: при правке кода не переустанавливаются
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install -r requirements.txt
 
-# Копируем весь код проекта в контейнер
-COPY . .
+# Код (секреты и url.yml исключены через .dockerignore)
+COPY --chown=bot:bot . .
 
-# Команда для запуска бота
+USER bot
+
 CMD ["python", "app.py"]
