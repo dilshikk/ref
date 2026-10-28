@@ -9,6 +9,7 @@ from loguru import logger
 from data.config import ADMINS
 from loader import db, bot
 from middlewares.antispam import SmartRateLimiter
+from middlewares.callback_answer import CallbackAutoAnswerMiddleware
 from services.audit_log import audit_log_service
 
 
@@ -28,7 +29,6 @@ def setup_handlers(dispatcher: Dispatcher) -> None:
 
 
 def setup_middlewares(dispatcher: Dispatcher) -> None:
-    from middlewares.throttling import ThrottlingMiddleware
     from middlewares.logger import ActionLoggerMiddleware
     from middlewares.blocked import BlockedUserMiddleware
     from middlewares.subscription import SubscriptionMiddleware
@@ -45,7 +45,8 @@ def setup_middlewares(dispatcher: Dispatcher) -> None:
     dispatcher.message.middleware(subscription_guard)
     dispatcher.callback_query.middleware(subscription_guard)
 
-    dispatcher.message.middleware(ThrottlingMiddleware(slow_mode_delay=0.5))
+    # Прежний ThrottlingMiddleware убран: он дублировал SmartRateLimiter и отвечал
+    # «Слишком много запросов» на быстрые ответы в формах, теряя их.
     dispatcher.message.middleware(action_logger)
     dispatcher.callback_query.middleware(action_logger)
 
@@ -175,8 +176,14 @@ async def run_polling() -> None:
     dispatcher.startup.register(aiogram_on_startup_polling)
     dispatcher.shutdown.register(aiogram_on_shutdown_polling)
 
-    dispatcher.message.middleware(SmartRateLimiter(limit=1.0))
-    dispatcher.callback_query.middleware(SmartRateLimiter(limit=1.0))
+    # Outer: срабатывает для любого нажатия, даже если хэндлер не найден — кнопки не висят
+    dispatcher.callback_query.outer_middleware(CallbackAutoAnswerMiddleware())
+
+    # Один общий экземпляр: сообщения и нажатия одного пользователя идут по очереди,
+    # чтобы кнопка и ответ в форме не обрабатывались одновременно и не ломали состояние.
+    rate_limiter = SmartRateLimiter(limit=1.0)
+    dispatcher.message.middleware(rate_limiter)
+    dispatcher.callback_query.middleware(rate_limiter)
 
     try:
         await dispatcher.start_polling(
