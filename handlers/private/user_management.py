@@ -127,12 +127,28 @@ async def show_users_page(event: types.Message | types.CallbackQuery, page: int)
 
 @router.message(F.text == "🔍 Поиск пользователя", IsBotAdminFilter(ADMINS))
 async def search_start(message: types.Message, state: FSMContext) -> None:
+    await state.clear()
     await message.answer("🔍 Введите ID, @username или имя пользователя:")
     await state.set_state(UserManagementFlow.search_input)
 
 
+async def _start_send_message(message: types.Message, state: FSMContext, telegram_id: int) -> None:
+    await state.update_data(target_user_id=telegram_id)
+    await state.set_state(UserManagementFlow.send_message_input)
+    await message.answer(
+        f"📩 Введите сообщение для пользователя <code>{telegram_id}</code>:\n"
+        "(поддерживается HTML-форматирование)",
+        parse_mode="HTML",
+    )
+
+
 @router.message(UserManagementFlow.search_input, IsBotAdminFilter(ADMINS))
 async def search_process(message: types.Message, state: FSMContext) -> None:
+    # search_purpose задают кнопки «💰 Изменить баланс» / «📨 Отправить сообщение» (#76, #77)
+    if not message.text:
+        await message.answer("🔍 Отправьте ID, @username или имя текстом.")
+        return
+    purpose = (await state.get_data()).get("search_purpose")
     query = message.text.strip().lstrip("@")
     await state.clear()
 
@@ -143,13 +159,20 @@ async def search_process(message: types.Message, state: FSMContext) -> None:
         return
 
     if len(users) == 1:
-        await show_profile(message, users[0]["telegram_id"])
+        telegram_id = users[0]["telegram_id"]
+        if purpose == "message":
+            await _start_send_message(message, state, telegram_id)
+        else:
+            # В профиле есть кнопки «➕ Начислить» / «➖ Обнулить»
+            await show_profile(message, telegram_id)
         return
 
+    # Для «Отправить сообщение» кнопка сразу открывает ввод текста, иначе — профиль
+    prefix = "umgmt_msg_" if purpose == "message" else "umgmt_profile_"
     buttons = [
         [types.InlineKeyboardButton(
             text=f"{u['full_name']} (@{u['username']})" if u["username"] else f"{u['full_name']} (без username)",
-            callback_data=f"umgmt_profile_{u['telegram_id']}"
+            callback_data=f"{prefix}{u['telegram_id']}"
         )]
         for u in users
     ]
@@ -240,7 +263,7 @@ async def add_balance_start(call: types.CallbackQuery, state: FSMContext) -> Non
 
 @router.message(UserManagementFlow.add_balance_input, IsBotAdminFilter(ADMINS), IsMoneyAdmin())
 async def add_balance_process(message: types.Message, state: FSMContext) -> None:
-    if not message.text.isdigit() or int(message.text) <= 0:
+    if not message.text or not message.text.isdigit() or int(message.text) <= 0:
         await message.answer("❌ Введите целое положительное число.")
         return
 
@@ -378,13 +401,7 @@ async def unblock_user(call: types.CallbackQuery) -> None:
 async def send_message_start(call: types.CallbackQuery, state: FSMContext) -> None:
     await call.answer()  # ✅
     telegram_id = int(call.data.split("_")[2])
-    await state.update_data(target_user_id=telegram_id)
-    await state.set_state(UserManagementFlow.send_message_input)
-    await call.message.answer(
-        f"📩 Введите сообщение для пользователя <code>{telegram_id}</code>:\n"
-        "(поддерживается HTML-форматирование)",
-        parse_mode="HTML",
-    )
+    await _start_send_message(call.message, state, telegram_id)
 
 
 @router.message(UserManagementFlow.send_message_input, IsBotAdminFilter(ADMINS))
