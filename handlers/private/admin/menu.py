@@ -2,8 +2,10 @@
 """Вход в админ-панель (/admin), «Назад» и общая отмена inline-кнопкой «Нет»."""
 from typing import Any, cast
 from aiogram import Router, types, F
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
+from loguru import logger
 from filters import private_only
 from keyboards.reply_keyboards import reply_keyboard_for_admin
 from filters.admin import IsBotAdminFilter
@@ -41,7 +43,7 @@ async def cancel_edit(call: types.CallbackQuery, state: FSMContext):
     msg_any = cast(Any, msg)
     try:
         await msg_any.delete()
-    except Exception:
-        pass
+    except TelegramAPIError as e:
+        logger.debug(f"Не удалось удалить сообщение: {e}")
     await msg_any.answer("❌ Действие отменено.", reply_markup=reply_keyboard_for_admin())
     await state.clear()

@@ -25,6 +25,7 @@ import html
 from typing import Any, cast
 
 from aiogram import F, Router, types
+from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.context import FSMContext
 from loguru import logger
 
@@ -58,8 +59,8 @@ async def _remove_buttons(call: types.CallbackQuery) -> None:
     if hasattr(message_any, "edit_reply_markup"):
         try:
             await message_any.edit_reply_markup(reply_markup=None)
-        except Exception:
-            pass
+        except TelegramAPIError as e:
+            logger.debug(f"Не удалось убрать кнопки заявки: {e}")
 
 
 async def _remove_buttons_by_id(message: types.Message, chat_id: int, message_id: int) -> None:
@@ -68,8 +69,8 @@ async def _remove_buttons_by_id(message: types.Message, chat_id: int, message_id
         return
     try:
         await message.bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id, reply_markup=None)
-    except Exception:
-        pass
+    except TelegramAPIError as e:
+        logger.debug(f"Не удалось убрать кнопки заявки (сообщение {message_id}): {e}")
 
 
 def _parse_req_id(data: str) -> int | None:

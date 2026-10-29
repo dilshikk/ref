@@ -20,7 +20,8 @@ class BlockedUserMiddleware(BaseMiddleware):
         super().__init__()
         self._cache: dict[int, tuple[bool, float]] = {}
 
-    async def _is_blocked(self, user_id: int) -> bool:
+    async def _is_blocked(self, user_id: int) -> bool | None:
+        """True/False — ответ базы; None — базу проверить не удалось."""
         now = time.monotonic()
         cached = self._cache.get(user_id)
         if cached and now - cached[1] < _CACHE_TTL_SECONDS:
@@ -28,8 +29,10 @@ class BlockedUserMiddleware(BaseMiddleware):
         try:
             blocked = await db.is_user_blocked(user_id)
         except Exception as e:
+            # Раньше сбой считался «не заблокирован» и кэшировался на 30 с:
+            # заблокированный получал доступ. Теперь не кэшируем и не пускаем (#51)
             logger.warning(f"Не удалось проверить блокировку user={user_id}: {e}")
-            blocked = False
+            return None
         self._cache[user_id] = (blocked, now)
         return blocked
 
@@ -50,8 +53,17 @@ class BlockedUserMiddleware(BaseMiddleware):
         if chat is not None and chat.type != "private":
             return await handler(event, data)
 
-        if not await self._is_blocked(user.id):
+        blocked = await self._is_blocked(user.id)
+        if blocked is False:
             return await handler(event, data)
+
+        if blocked is None:
+            text = "⚠️ Временная ошибка, попробуйте через минуту."
+            if isinstance(event, CallbackQuery):
+                await event.answer(text, show_alert=True)
+            elif isinstance(event, Message):
+                await event.answer(text)
+            return None
 
         if isinstance(event, CallbackQuery):
             await event.answer("⛔ Ваш аккаунт заблокирован.", show_alert=True)

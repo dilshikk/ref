@@ -1,4 +1,3 @@
-# /www/wwwroot/uz_ibot/app.py
 import asyncio
 import sys
 
@@ -116,6 +115,8 @@ async def database_connected() -> None:
     await db.ensure_payout_card_encryption()
     # Одна заявка на вывод в ожидании на пользователя — защита от дублей в БД (#47)
     await db.ensure_unique_pending_payout()
+    # Имя держателя карты сохраняется в заявке (#51)
+    await db.ensure_payout_card_holder_column()
     # Рассылки: прогресс по получателям и пометка заблокировавших бота (#19)
     await db.ensure_broadcast_progress_columns()
 

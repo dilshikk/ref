@@ -1,4 +1,5 @@
-# /www/wwwroot/uz_ibot/handlers/private/support.py
+import html
+
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -58,7 +59,7 @@ async def support_send_to_admins(message: types.Message, state: FSMContext) -> N
         return
 
     preview = _support_preview(message)
-    username = f"@{user.username}" if user.username else "-"
+    username = f"@{html.escape(user.username)}" if user.username else "-"
     kb = InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="✉️ Ответить", callback_data=f"support_reply_{user.id}")]]
     )
@@ -69,10 +70,10 @@ async def support_send_to_admins(message: types.Message, state: FSMContext) -> N
             await bot.send_message(
                 admin_id,
                 "📨 <b>Новое обращение в поддержку</b>\n\n"
-                f"👤 Пользователь: <b>{user.full_name}</b>\n"
+                f"👤 Пользователь: <b>{html.escape(user.full_name)}</b>\n"
                 f"🆔 ID: <code>{user.id}</code>\n"
                 f"👤 Username: {username}\n"
-                f"📝 Превью: <code>{preview}</code>",
+                f"📝 Превью: <code>{html.escape(preview)}</code>",
                 parse_mode="HTML",
                 reply_markup=kb,
             )

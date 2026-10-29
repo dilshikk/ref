@@ -13,6 +13,8 @@
 - реквизиты выплат шифруются при записи и расшифровываются при чтении (#20).
 - add_payout_request: «одна заявка в ожидании» и «одна заявка в сутки» проверяются
   в том же SQL, что и вставка, плюс уникальный индекс в БД (#47).
+- имя держателя карты сохраняется в заявке (зашифрованным), чтобы после выплаты
+  можно было проверить, на чьё имя переводили (#51).
 """
 from __future__ import annotations
 
@@ -30,8 +32,9 @@ def _decrypt_row(row: Any) -> dict[str, Any] | None:
     if row is None:
         return None
     data = dict(row)
-    if "card_number" in data:
-        data["card_number"] = payment_details.decrypt(data["card_number"])
+    for field in ("card_number", "card_holder"):
+        if data.get(field) is not None:
+            data[field] = payment_details.decrypt(data[field])
     return data
 
 
@@ -357,6 +360,10 @@ class ReferralDatabase(SafeDatabase):
         )
         logger.info("✅ Одна заявка на вывод в ожидании на пользователя (uq_payout_pending_user).")
 
+    async def ensure_payout_card_holder_column(self) -> None:
+        """Миграция (#51): имя держателя карты раньше было только в уведомлении админам."""
+        await self.execute("ALTER TABLE PayoutRequests ADD COLUMN IF NOT EXISTS card_holder TEXT NULL")
+
     async def add_payout_request(
         self,
         user_id: int,
@@ -364,6 +371,7 @@ class ReferralDatabase(SafeDatabase):
         username: str | None,
         card_number: str,
         amount: float,
+        card_holder: str | None = None,
     ) -> int | None:
         """
         Создаёт заявку и возвращает её ID или None, если у пользователя уже есть
@@ -374,8 +382,8 @@ class ReferralDatabase(SafeDatabase):
         """
         row = await self.execute(
             """
-            INSERT INTO PayoutRequests (user_id, full_name, username, card_number, amount, status)
-            SELECT $1, $2, $3, $4, $5, 'pending'
+            INSERT INTO PayoutRequests (user_id, full_name, username, card_number, amount, status, card_holder)
+            SELECT $1, $2, $3, $4, $5, 'pending', $6
             WHERE NOT EXISTS (
                 SELECT 1 FROM PayoutRequests
                 WHERE user_id = $1
@@ -384,7 +392,14 @@ class ReferralDatabase(SafeDatabase):
             ON CONFLICT DO NOTHING
             RETURNING id
             """,
-            parameters=(user_id, full_name, username, payment_details.encrypt(card_number), amount),
+            parameters=(
+                user_id,
+                full_name,
+                username,
+                payment_details.encrypt(card_number),
+                amount,
+                payment_details.encrypt(card_holder) if card_holder else None,
+            ),
             fetchone=True,
         )
         return int(row["id"]) if row else None

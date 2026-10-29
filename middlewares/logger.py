@@ -55,8 +55,9 @@ class ActionLoggerMiddleware(BaseMiddleware):
         return True
 
     async def _send_log(self, bot: Any, text: str) -> None:
-        # В фоне, чтобы отправка лога не задерживала ответ пользователю
-        if not self._can_send():
+        # В фоне, чтобы отправка лога не задерживала ответ пользователю.
+        # LOG_GROUP_ID необязателен: без него логи в группу не шлём (#51)
+        if LOG_GROUP_ID is None or not self._can_send():
             return
         try:
             await bot.send_message(LOG_GROUP_ID, text, parse_mode="HTML")

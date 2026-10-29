@@ -1,4 +1,3 @@
-# /www/wwwroot/uz_ibot/handlers/private/payout_history.py
 from aiogram import Router, types, F
 from filters import private_only
 from loader import db

@@ -1,4 +1,3 @@
-# Файл: /www/wwwroot/uz_ibot/data/config.py
 from pathlib import Path
 import yaml
 from environs import Env
@@ -26,8 +25,8 @@ MONEY_ADMINS: list[int] = sorted({MONEY_ADMIN, *(int(a) for a in env.list("MONEY
 # для вывода средств.
 GROUP_ID: int = env.int("GROUP_ID")
 
-# 📊 ID группы для логов (опционально)
-LOG_GROUP_ID: int = env.int("LOG_GROUP_ID")
+# 📊 ID группы для логов (опционально): без переменной логи в группу не отправляются (#51)
+LOG_GROUP_ID: int | None = env.int("LOG_GROUP_ID", None)
 
 # 📁 Путь к директории с конфигурацией
 config_dir = Path(__file__).parent.parent.resolve() / "data"

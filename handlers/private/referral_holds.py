@@ -9,6 +9,7 @@ referral_holds. Здесь админ видит, у кого сколько о�
 from typing import Any, cast
 
 from aiogram import F, Router, types
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
 from loguru import logger
 
@@ -73,8 +74,8 @@ async def _drop_buttons(call: types.CallbackQuery, note: str) -> None:
         return
     try:
         await msg.edit_text(f"{msg.html_text}\n\n{note}", parse_mode="HTML", reply_markup=None)
-    except Exception:
-        pass
+    except TelegramAPIError as e:
+        logger.debug(f"Не удалось обновить сообщение об удержании: {e}")
 
 
 @router.callback_query(F.data.startswith("hold_ok_"), IsBotAdminFilter(ADMINS), IsMoneyAdmin())
