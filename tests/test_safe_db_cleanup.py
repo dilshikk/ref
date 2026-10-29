@@ -1,7 +1,7 @@
 """
 Защита от возврата устаревшего кода в SafeDatabase (#49). Запуск: python -m pytest tests
 
-Модуль не импортируем (он тянет SQLAlchemy и настройки бота) — разбираем исходник
+Модули не импортируем (они тянут SQLAlchemy и настройки бота) — разбираем исходник
 через ast: так проверка работает без базы и без .env.
 """
 import ast
@@ -18,7 +18,7 @@ ADMIN_SCREENS = [
     ROOT / "handlers" / "private" / "admin" / "security.py",
     ROOT / "handlers" / "private" / "admin" / "bot.py",
 ]
-# Числовые настройки: их значение должно браться только из get_settings()
+# Числовые настройки: показывать их нужно только через get_settings()
 NUMERIC_KEYS = {
     "invited_credit", "vote_credit", "min_balance", "max_withdraw",
     "group_member_count", "antispam_referral_limit",
@@ -57,23 +57,6 @@ def test_add_balance_requires_price():
     positional = [a.arg for a in add_balance.args.args]
     assert "price" not in positional, "price должен передаваться только по имени"
     assert "price" in kwonly and kwonly["price"] is None, "у price не должно быть значения по умолчанию"
-
-
-def _url_yaml_get_keys(path: Path) -> set[str]:
-    """Ключи из вызовов url_yaml.get("ключ", ...) в файле."""
-    keys: set[str] = set()
-    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "get"
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id == "url_yaml"
-            and node.args
-            and isinstance(node.args[0], ast.Constant)
-        ):
-            keys.add(str(node.args[0].value))
-    return keys
 
 
 def _get_calls_with_default(path: Path) -> set[str]:
