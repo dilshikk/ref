@@ -2,6 +2,7 @@
 """🤖 Бот: тексты, опросы, ссылка голосования, реферальные настройки, команды меню.
 Заглушки «🏠 Главное меню», «🌍 Языки», «📢 Уведомления» удалены (#87, #89, #90):
 их кнопок нет ни на одной клавиатуре."""
+import html
 from typing import Any, cast
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
@@ -15,13 +16,22 @@ from loader import db
 from states.flows import AdminFlow
 from filters.admin import IsBotAdminFilter
 from data.config import ADMINS, url_yaml
-from data.settings import get_settings
+from data.settings import NAME_PLACEHOLDER, TEXT_TEMPLATE_KEYS, get_settings
 from utils.yaml_io import save_url_yaml
 from utils.bot_commands import ADMIN_COMMANDS, USER_COMMANDS, format_commands, set_all_commands
 
 from .common import cancel_kb, forms_router, record_setting_change, short_text
 
 router = private_only(Router(name="private.admin.bot"))
+
+# «ключ=-» сбрасывает шаблон: бот снова показывает текст по умолчанию (#88)
+_RESET_VALUE = "-"
+# Где показывается каждый шаблон — чтобы админ понимал, что меняет
+TEMPLATE_PLACES: dict[str, str] = {
+    "start": "приветствие после /start",
+    "help": "ответ на /help",
+    "support": "текст после кнопки «📞 Поддержка»",
+}
 
 
 @router.message(F.text == "🤖 Бот", IsBotAdminFilter(ADMINS))
@@ -34,30 +44,29 @@ async def bot_menu(message: types.Message):
     )
 
 
+def _texts_overview() -> str:
+    # Те же значения, что видит бот (get_settings), экранированные для HTML
+    templates = get_settings().text_templates
+    lines = []
+    for key in TEXT_TEMPLATE_KEYS:
+        value = templates.get(key)
+        current = f"<code>{html.escape(short_text(value, 90))}</code>" if value else "по умолчанию"
+        lines.append(f"• <code>{key}</code> — {TEMPLATE_PLACES[key]}\n   Сейчас: {current}")
+    return (
+        "📝 <b>Тексты</b>\n\n"
+        + "\n".join(lines)
+        + "\n\nОтправьте строку: <code>ключ=текст</code>\n"
+        f"• <code>{NAME_PLACEHOLDER}</code> заменится на имя пользователя\n"
+        f"• <code>ключ={_RESET_VALUE}</code> — вернуть текст по умолчанию\n"
+        "• оформление (жирный и т.п.) не поддерживается — текст показывается как есть\n\n"
+        "Пример:\n"
+        "<code>start=👋 Привет, {name}! Приглашай друзей и зарабатывай.</code>"
+    )
+
+
 @router.message(F.text == "📝 Тексты", IsBotAdminFilter(ADMINS))
 async def bot_texts_menu(message: types.Message, state: FSMContext):
-    templates = cast(dict[str, Any], url_yaml.get("text_templates") or {})
-    start_tpl = short_text(templates.get("start"), 90) if templates.get("start") else "—"
-    help_tpl = short_text(templates.get("help"), 90) if templates.get("help") else "—"
-    support_tpl = short_text(templates.get("support"), 90) if templates.get("support") else "—"
-
-    await message.answer(
-        "📝 <b>Тексты</b>\n\n"
-        "Редактор шаблонов уже доступен.\n"
-        "Отправьте строку в формате: <code>ключ=текст</code>\n\n"
-        "Доступные ключи:\n"
-        "• <code>start</code>\n"
-        "• <code>help</code>\n"
-        "• <code>support</code>\n\n"
-        "Текущие значения:\n"
-        f"• start: <code>{start_tpl}</code>\n"
-        f"• help: <code>{help_tpl}</code>\n"
-        f"• support: <code>{support_tpl}</code>\n\n"
-        "Пример:\n"
-        "<code>support=📞 Для связи: @your_support</code>",
-        parse_mode="HTML",
-        reply_markup=cancel_kb,
-    )
+    await message.answer(_texts_overview(), parse_mode="HTML", reply_markup=cancel_kb)
     await state.set_state(AdminFlow.set_text_template)
 
 
@@ -82,21 +91,28 @@ async def update_text_template(message: types.Message, state: FSMContext):
     key = key_raw.strip().lower()
     value = value_raw.strip()
 
-    if key not in {"start", "help", "support"}:
+    if key not in TEXT_TEMPLATE_KEYS:
         await message.answer(
-            "❌ Неизвестный ключ.\n"
-            "Доступно: <code>start</code>, <code>help</code>, <code>support</code>",
+            "❌ Неизвестный ключ.\nДоступно: "
+            + ", ".join(f"<code>{k}</code>" for k in TEXT_TEMPLATE_KEYS),
             parse_mode="HTML",
             reply_markup=cancel_kb,
         )
         return
     if not value:
-        await message.answer("❌ Текст не должен быть пустым.", reply_markup=cancel_kb)
+        await message.answer(
+            f"❌ Текст не должен быть пустым. Чтобы вернуть стандартный: {key}={_RESET_VALUE}",
+            reply_markup=cancel_kb,
+        )
         return
 
     templates = cast(dict[str, Any], url_yaml.get("text_templates") or {})
     old_value = templates.get(key)
-    templates[key] = value
+    reset = value == _RESET_VALUE
+    if reset:
+        templates.pop(key, None)
+    else:
+        templates[key] = value
     url_yaml["text_templates"] = templates
     save_url_yaml()
 
@@ -104,15 +120,16 @@ async def update_text_template(message: types.Message, state: FSMContext):
         actor_id=user.id,
         setting_name=f"text_templates.{key}",
         old_value=old_value,
-        new_value=value,
+        new_value=None if reset else value,
     )
 
-    await message.answer(
-        f"✅ Шаблон <code>{key}</code> обновлён.\n\n"
-        f"Новое значение:\n<code>{short_text(value, 300)}</code>",
-        parse_mode="HTML",
-        reply_markup=bot_kb(),
+    result = (
+        f"✅ Шаблон <code>{key}</code> сброшен — бот показывает текст по умолчанию."
+        if reset
+        else f"✅ Шаблон <code>{key}</code> обновлён и уже действует.\n\n"
+        f"Новое значение:\n<code>{html.escape(short_text(value, 300))}</code>"
     )
+    await message.answer(result, parse_mode="HTML", reply_markup=bot_kb())
     await state.clear()
 
 
