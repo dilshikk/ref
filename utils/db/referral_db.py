@@ -2,11 +2,12 @@
 """
 Дополнения к SafeDatabase по итогам аудита.
 
-- approve_payout_if_pending: баланс и норма «добавил N участников» проверяются
-  в том же SQL, что и списание (строки блокируются FOR UPDATE). Раньше баланс
-  проверялся в Python, а списание шло через GREATEST(0, …): выход реферала между
-  ними уводил баланс в ноль.
+- approve_payout_if_pending: баланс, деньги «на проверке» (#46) и норма «добавил
+  N участников» проверяются в том же SQL, что и списание (строки блокируются
+  FOR UPDATE). Раньше баланс проверялся в Python, а списание шло через
+  GREATEST(0, …): выход реферала между ними уводил баланс в ноль.
 - get_payout_approval_state: почему одобрение не прошло — для сообщения админу.
+- update_invite_current_count_set_0: «Обнулить» больше не стирает долг (#46).
 - referral_holds: вступления сверх антифрод-лимита больше не теряются, а ждут
   решения администратора (/holds).
 - _database_url: строка подключения собирается через URL.create (#21).
@@ -25,6 +26,7 @@ from sqlalchemy.engine import URL
 
 from utils import payment_details
 from utils.db.safe_db import SafeDatabase
+from utils.db.unverified_sql import unverified_sum_sql
 
 
 def _decrypt_row(row: Any) -> dict[str, Any] | None:
@@ -57,12 +59,26 @@ class ReferralDatabase(SafeDatabase):
             database=self.db_name,
         )
 
+    async def update_invite_current_count_set_0(self, user_id: int) -> None:
+        """
+        Обнуление баланса админом: положительный остаток → 0, счётчик → 0.
+        Долг (отрицательный balance_sum после выхода приглашённых) сохраняется (#46):
+        раньше «Обнулить» его стирал, и потеря снова ложилась на владельца бота.
+        История сохраняется.
+        """
+        await self.execute(
+            "UPDATE UserInviteCount SET current_count = 0, balance_sum = LEAST(balance_sum, 0) WHERE user_id = $1",
+            parameters=(user_id,),
+        )
+
     async def approve_payout_if_pending(
         self,
         request_id: int,
         credits_to_deduct: int,
         group_id: int | None = None,
         members_to_deduct: int = 0,
+        hold_hours: int = 0,
+        check_quality: bool = False,
     ):
         """
         В одной транзакции: pending → approved, списание ровно выплаченной суммы
@@ -72,7 +88,8 @@ class ReferralDatabase(SafeDatabase):
         для следующего вывода. Лишние добавленные сверх нормы сохраняются.
 
         Условия одобрения проверяются ЗДЕСЬ ЖЕ, в SQL, а не в Python перед вызовом:
-        - баланс пользователя не меньше суммы заявки;
+        - баланс минус деньги «на проверке» (#46) не меньше суммы заявки — раньше
+          правило работало только при подаче заявки;
         - добавлено не меньше members_to_deduct участников (если норма > 0).
         Строки заявки и баланса блокируются (FOR UPDATE), поэтому выход реферала
         между проверкой и списанием больше не уводит баланс «в ноль» через GREATEST.
@@ -80,15 +97,16 @@ class ReferralDatabase(SafeDatabase):
         Возвращает строку или None, если заявка уже обработана ИЛИ условия не выполнены
         (причину можно узнать через get_payout_approval_state).
         """
+        locked = unverified_sum_sql("pr.user_id", "CAST($5 AS INT)", "CAST($3 AS BIGINT)", "CAST($6 AS BOOLEAN)")
         return await self.execute(
-            """
+            f"""
             WITH chk AS (
                 SELECT pr.id, pr.user_id, pr.amount
                 FROM PayoutRequests pr
                 JOIN UserInviteCount uic ON uic.user_id = pr.user_id
                 WHERE pr.id = $1
                   AND pr.status = 'pending'
-                  AND uic.balance_sum >= CAST(CEIL(pr.amount) AS BIGINT)
+                  AND uic.balance_sum - {locked} >= CAST(CEIL(pr.amount) AS BIGINT)
                   AND (
                       $4 <= 0
                       OR COALESCE((
@@ -120,17 +138,32 @@ class ReferralDatabase(SafeDatabase):
             )
             SELECT id, user_id, amount FROM upd
             """,
-            parameters=(request_id, credits_to_deduct, group_id, max(0, int(members_to_deduct))),
+            parameters=(
+                request_id,
+                credits_to_deduct,
+                group_id,
+                max(0, int(members_to_deduct)),
+                int(hold_hours),
+                bool(check_quality),
+            ),
             fetchone=True,
         )
 
-    async def get_payout_approval_state(self, request_id: int, group_id: int | None):
-        """Статус заявки, текущий баланс и число добавленных — чтобы объяснить админу отказ."""
+    async def get_payout_approval_state(
+        self,
+        request_id: int,
+        group_id: int | None,
+        hold_hours: int = 0,
+        check_quality: bool = False,
+    ):
+        """Статус заявки, баланс, деньги «на проверке» и число добавленных — чтобы объяснить админу отказ."""
+        locked = unverified_sum_sql("pr.user_id", "CAST($3 AS INT)", "CAST($2 AS BIGINT)", "CAST($4 AS BOOLEAN)")
         return await self.execute(
-            """
+            f"""
             SELECT pr.status,
                    pr.amount,
                    COALESCE(uic.balance_sum, 0) AS balance_sum,
+                   {locked} AS locked_sum,
                    COALESCE(gm.add_user_count, 0) AS add_user_count
             FROM PayoutRequests pr
             LEFT JOIN UserInviteCount uic ON uic.user_id = pr.user_id
@@ -138,7 +171,7 @@ class ReferralDatabase(SafeDatabase):
                    ON gm.user_id = pr.user_id AND gm.group_id = CAST($2 AS BIGINT)
             WHERE pr.id = $1
             """,
-            parameters=(request_id, group_id),
+            parameters=(request_id, group_id, int(hold_hours), bool(check_quality)),
             fetchone=True,
         )
 
