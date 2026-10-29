@@ -5,6 +5,7 @@ def setup_routers() -> Router:
     from .groups import member_events
     from .private import (
         admin_panel,
+        broadcasts,
         payout_guard,
         referral_holds,
         onboarding,
@@ -39,6 +40,9 @@ def setup_routers() -> Router:
         # одобрения/отклонения выплат перехватывают старые из admin_panel
         payout_guard.router,
         referral_holds.router,
+        # broadcasts тоже ПЕРЕД admin_panel: заменяет старые обработчики рассылок (#19)
+        broadcasts.router,
+        broadcasts.member_router,
         admin_panel.router,
         onboarding.private_router,
         faq.router,

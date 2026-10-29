@@ -103,6 +103,8 @@ async def database_connected() -> None:
     await db.ensure_referral_reversal_columns()
     # Реквизиты выплат: колонка TEXT и шифрование старых заявок (#20)
     await db.ensure_payout_card_encryption()
+    # Рассылки: прогресс по получателям и пометка заблокировавших бота (#19)
+    await db.ensure_broadcast_progress_columns()
 
     logger.info("✅ Все таблицы проверены и готовы.")
 
@@ -110,7 +112,7 @@ async def database_connected() -> None:
 async def aiogram_on_startup_polling(dispatcher: Dispatcher) -> None:
     from utils.bot_commands import set_all_commands
     from utils.startup_notifications import on_startup_notify
-    from handlers.private.admin_panel import start_broadcast_scheduler
+    from services.broadcast_runner import start_broadcast_scheduler
 
     logger.info("Connecting to database")
     await db.create_pool()
@@ -128,13 +130,14 @@ async def aiogram_on_startup_polling(dispatcher: Dispatcher) -> None:
     # в группу по реферальным ссылкам — их потеря означает потерю начислений.
     await bot.delete_webhook(drop_pending_updates=False)
     await setup_aiogram(dispatcher=dispatcher)
+    # Прерванные рестартом рассылки продолжатся с сохранённого места (#19)
     await start_broadcast_scheduler()
     await on_startup_notify(bot=bot)
     await set_all_commands(bot=bot, admin_ids=ADMINS)
 
 
 async def aiogram_on_shutdown_polling(dispatcher: Dispatcher) -> None:
-    from handlers.private.admin_panel import stop_broadcast_scheduler
+    from services.broadcast_runner import stop_broadcast_scheduler
 
     logger.info("Stopping polling")
     try:
