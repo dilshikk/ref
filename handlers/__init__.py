@@ -24,8 +24,7 @@ def setup_routers() -> Router:
     from utils.yaml_io import save_url_yaml
 
     # Все обработчики админки вызывают _save_yaml() через глобальное имя модуля,
-    # поэтому подмена здесь переключает их на атомарную запись в URL_YML_PATH
-    # (по тому же принципу payout_guard перекрывает старые обработчики выплат).
+    # поэтому подмена здесь переключает их на атомарную запись в URL_YML_PATH.
     admin_panel._save_yaml = save_url_yaml
 
     router = Router(name="handlers.root")
@@ -36,8 +35,8 @@ def setup_routers() -> Router:
     router.errors.register(error_router.MyErrorHandler)
 
     router.include_routers(
-        # payout_guard стоит ПЕРЕД admin_panel: его исправленные обработчики
-        # одобрения/отклонения выплат перехватывают старые из admin_panel
+        # payout_guard — единственное место с обработчиками выплат (#35);
+        # стоит первым, чтобы money_guard отвечал раньше остальных роутеров
         payout_guard.router,
         referral_holds.router,
         # broadcasts тоже ПЕРЕД admin_panel: заменяет старые обработчики рассылок (#19)
