@@ -15,13 +15,17 @@ from keyboards.reply_keyboards.menu import menu_kb
 from loader import db
 from services.activity import activity_service
 from services.audit_log import audit_log_service
-from services.subscription import is_user_subscribed
+from services.subscription import get_subscription_status
+from utils.subscription_status import SubscriptionStatus
 
 private_router = private_only(Router(name="private.onboarding.start"))
-group_router = Router(name="private.onboarding.group")
 router = private_router
 
 _SUBSCRIBE_TEXT = "Чтобы пользоваться ботом, подпишитесь на все каналы 👇"
+_UNKNOWN_TEXT = (
+    "⚠️ Не удалось проверить подписку на каналы. "
+    "Подпишитесь на все каналы и нажмите «Я подписался» через минуту 👇"
+)
 
 
 def _start_pitch(full_name: str) -> str:
@@ -99,14 +103,10 @@ async def _register_user(user_obj: types.User) -> None:
     )
 
 
-async def _check_subscription(user_id: int) -> bool:
-    # Как и в SubscriptionMiddleware: если проверить не получилось, пускаем,
-    # а не оставляем человека без ответа
-    try:
-        return await is_user_subscribed(user_id=user_id, use_cache=False)
-    except Exception as e:
-        logger.error(f"/start: проверка подписки не удалась user={user_id}: {e}")
-        return True
+async def _check_subscription(user_id: int) -> SubscriptionStatus:
+    # Сбой проверки больше не засчитывается как подписка (#24). Человек не остаётся
+    # без ответа: получает кнопки каналов и может повторить проверку.
+    return await get_subscription_status(user_id=user_id, use_cache=False)
 
 
 async def _subscription_keyboard(referrer_id: int | None) -> InlineKeyboardMarkup:
@@ -120,17 +120,6 @@ async def _subscription_keyboard(referrer_id: int | None) -> InlineKeyboardMarku
         return InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="✅ Я подписался", callback_data=callback)
         ]])
-
-
-@group_router.message(F.chat.type.in_({"group", "supergroup"}))
-async def respond_in_group(message: types.Message) -> None:
-    if not message.text:
-        return
-    text = message.text.lower()
-    if "привет" in text or "салом" in text:
-        await message.answer("Привет! Чем могу помочь?")
-    elif "спасибо" in text or "рахмат" in text:
-        await message.answer("Не за что 😊")
 
 
 @private_router.message(CommandStart())
@@ -159,7 +148,8 @@ async def start(message: types.Message, command: CommandObject, state: FSMContex
         telegram_id,
     )
 
-    if await _check_subscription(telegram_id):
+    status = await _check_subscription(telegram_id)
+    if status is SubscriptionStatus.SUBSCRIBED:
         await message.answer(
             _start_pitch(user_obj.full_name),
             parse_mode="HTML",
@@ -168,8 +158,9 @@ async def start(message: types.Message, command: CommandObject, state: FSMContex
         await _send_referrer_group_link(message, referrer_id)
         return
 
-    # Неподписанный пользователь всегда получает кнопки подписки
-    await message.answer(_SUBSCRIBE_TEXT, reply_markup=await _subscription_keyboard(referrer_id))
+    # Неподписанный (или непроверенный) пользователь всегда получает кнопки подписки
+    text = _UNKNOWN_TEXT if status is SubscriptionStatus.UNKNOWN else _SUBSCRIBE_TEXT
+    await message.answer(text, reply_markup=await _subscription_keyboard(referrer_id))
 
 
 async def _handle_subscription_check(call: types.CallbackQuery, variant: str, referrer_id: int | None) -> None:
@@ -191,9 +182,15 @@ async def _handle_subscription_check(call: types.CallbackQuery, variant: str, re
         call.from_user.id,
     )
 
-    if not await _check_subscription(call.from_user.id):
+    status = await _check_subscription(call.from_user.id)
+    if status is not SubscriptionStatus.SUBSCRIBED:
         # Сообщение не удаляем — пользователь видит кнопки каналов и пробует снова
-        await call.answer("❗️ Вы подписались не на все каналы", show_alert=True)
+        alert = (
+            "⚠️ Не удалось проверить подписку. Попробуйте через минуту."
+            if status is SubscriptionStatus.UNKNOWN
+            else "❗️ Вы подписались не на все каналы"
+        )
+        await call.answer(alert, show_alert=True)
         return
 
     await call.answer()

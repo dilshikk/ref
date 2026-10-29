@@ -13,6 +13,7 @@ from data.config import ADMINS, GROUP_ID
 from data.settings import get_settings
 from loader import db, bot
 from services.group_adds import qualification_enabled
+from utils.background import spawn
 
 router = Router(name="groups.member_events")
 
@@ -87,8 +88,9 @@ async def _send_welcome_dm(user: types.User, group_id: int) -> None:
                 f"чтобы начать зарабатывать 🤑",
                 parse_mode="HTML",
             )
-            # Фоновая задача — хэндлер не блокируется
-            asyncio.create_task(_delete_after(group_id, msg.message_id, delay=30))
+            # Фоновая задача — хэндлер не блокируется. spawn() хранит ссылку на задачу,
+            # иначе сборщик мусора мог удалить её до удаления приветствия (#24)
+            spawn(_delete_after(group_id, msg.message_id, delay=30), name=f"delete-welcome-{msg.message_id}")
             logger.info(f"📢 Приветствие в группу user={user.id}, удалится через 30 сек")
 
         except Exception as e:
@@ -378,9 +380,8 @@ async def on_user_join(event: types.ChatMemberUpdated) -> None:
     await _send_welcome_dm(user, group_id)
 
 
-# Обработчика всех сообщений группы здесь больше нет: он стоял раньше
-# onboarding.group_router и забирал каждое сообщение себе, поэтому бот никогда
-# не отвечал в группе на «привет»/«спасибо», а лог засорялся предупреждениями.
+# Обработчиков обычных сообщений в группе нет: бот не отвечает в публичной группе
+# на «привет»/«спасибо» (обработчик onboarding.group_router удалён, #24).
 # Активность в группе (для проверки добавленных, #18) записывает
 # middlewares/group_activity.py — он не забирает сообщения у обработчиков.
 

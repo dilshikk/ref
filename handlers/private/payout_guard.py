@@ -36,6 +36,7 @@ from loader import db
 from states.flows import AdminFlow
 from handlers.private.admin_panel import _send_payout_report
 from utils import payment_details
+from utils.payout_math import credits_for_amount
 
 router = private_only(Router(name="private.payout_guard"))
 
@@ -240,8 +241,7 @@ async def payout_finalize_with_receipt(message: types.Message, state: FSMContext
     # а не обнуляем весь баланс: остаток и новые рефералы сохраняются.
     settings = get_settings()
     amount = int(payout_row.get("amount") or 0)
-    invited_credit = settings.invited_credit
-    credits_to_deduct = -(-amount // invited_credit) if invited_credit > 0 else 0
+    credits_to_deduct = credits_for_amount(amount, settings.invited_credit)
     required_members = settings.group_member_count
 
     # Баланс и норма «добавил N участников» проверяются внутри того же SQL, что и
