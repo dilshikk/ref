@@ -27,7 +27,8 @@ from aiogram import F, Router, types
 from aiogram.fsm.context import FSMContext
 from loguru import logger
 
-from data.config import ADMINS, GROUP_ID, MONEY_ADMINS, url_yaml
+from data.config import ADMINS, GROUP_ID, MONEY_ADMINS
+from data.settings import get_settings
 from filters import private_only
 from filters.admin import IsAdminWithoutMoneyRights, IsBotAdminFilter, IsMoneyAdmin
 from keyboards.reply_keyboards import finance_kb
@@ -48,20 +49,6 @@ _receipt_kb = types.ReplyKeyboardMarkup(
     ],
     resize_keyboard=True,
 )
-
-
-def _required_members() -> int:
-    try:
-        return max(0, int(url_yaml.get("group_member_count", 3) or 0))
-    except (TypeError, ValueError):
-        return 0
-
-
-def _invited_credit() -> int:
-    try:
-        return max(0, int(url_yaml.get("invited_credit", 0) or 0))
-    except (TypeError, ValueError):
-        return 0
 
 
 async def _remove_buttons(call: types.CallbackQuery) -> None:
@@ -251,10 +238,11 @@ async def payout_finalize_with_receipt(message: types.Message, state: FSMContext
 
     # Списываем только выплаченную сумму (в рефералах, с округлением вверх),
     # а не обнуляем весь баланс: остаток и новые рефералы сохраняются.
+    settings = get_settings()
     amount = int(payout_row.get("amount") or 0)
-    invited_credit = _invited_credit()
+    invited_credit = settings.invited_credit
     credits_to_deduct = -(-amount // invited_credit) if invited_credit > 0 else 0
-    required_members = _required_members()
+    required_members = settings.group_member_count
 
     # Баланс и норма «добавил N участников» проверяются внутри того же SQL, что и
     # списание: между проверкой и списанием никто не успеет выйти из группы.
