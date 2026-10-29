@@ -13,6 +13,7 @@ from loader import db
 from states.flows import AdminFlow
 from filters.admin import IsBotAdminFilter
 from data.config import ADMINS, url_yaml
+from data.settings import get_settings
 from utils.yaml_io import save_url_yaml
 from utils.bot_commands import ADMIN_COMMANDS, USER_COMMANDS, format_commands, set_all_commands
 
@@ -135,10 +136,13 @@ async def bot_languages_menu(message: types.Message):
 
 @router.message(F.text == "🎁 Реферальные настройки", IsBotAdminFilter(ADMINS))
 async def bot_referral_menu(message: types.Message):
+    # get_settings(): те же значения, по которым бот реально начисляет (#49)
+    settings = get_settings()
     await message.answer(
         "🎁 <b>Реферальные настройки</b>\n\n"
-        f"Сумма за приглашение: <b>{url_yaml.get('invited_credit', 0)}</b>\n"
-        f"Антифрод-лимит: <b>{url_yaml.get('antispam_referral_limit', 100)}</b>",
+        f"Сумма за приглашение: <b>{settings.invited_credit}</b>\n"
+        f"Антифрод-лимит: <b>{settings.antispam_referral_limit}</b> в час, "
+        f"<b>{settings.antispam_referral_daily_limit}</b> в сутки",
         parse_mode="HTML",
         reply_markup=settings_kb(),
     )
@@ -156,20 +160,11 @@ async def bot_notifications_menu(message: types.Message):
 
 @router.message(F.text == "🗳 Опросы", IsBotAdminFilter(ADMINS))
 async def bot_polls_menu(message: types.Message, state: FSMContext):
-    default_question = "Насколько вам удобен наш бот?"
-    default_options = ["Отлично", "Нормально", "Нужно улучшить"]
-
-    question = str(url_yaml.get("poll_question") or default_question).strip()
-    raw_options = url_yaml.get("poll_options")
-    if isinstance(raw_options, list):
-        options = [str(x).strip() for x in raw_options if str(x).strip()]
-    elif isinstance(raw_options, str):
-        options = [part.strip() for part in raw_options.split("|") if part.strip()]
-    else:
-        options = []
-    if len(options) < 2:
-        options = default_options
-    options = options[:10]
+    # Вопрос и варианты разбирает get_settings() — та же логика, что при рассылке
+    # опроса. Раньше здесь была своя копия разбора с отдельными умолчаниями (#49).
+    settings = get_settings()
+    question = settings.poll_question
+    options = settings.poll_options
 
     voters = await db.count_poll_voters(question)
     polls_sent = await db.count_poll_instances(question)
