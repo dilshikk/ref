@@ -8,10 +8,13 @@
   Зашифрованное значение хранится с префиксом "enc:", поэтому старые
   незашифрованные заявки продолжают читаться как есть.
   Без ключа бот работает как раньше (открытым текстом) и пишет предупреждение.
+- Формы вывода в fsm_storage (#44): seal_form/open_form шифруют карту и имя
+  держателя перед записью в базу и расшифровывают при чтении.
 """
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from functools import lru_cache
 from typing import Any
 
@@ -19,6 +22,9 @@ from loguru import logger
 
 ENC_PREFIX = "enc:"
 UNREADABLE = "⚠️ не расшифровано"
+
+# Поля формы вывода, которые нельзя хранить в fsm_storage открытым текстом (#44)
+SENSITIVE_FORM_FIELDS: tuple[str, ...] = ("payment_info", "card_holder")
 
 # Коды мобильных операторов Узбекистана (после 998)
 UZ_MOBILE_CODES = frozenset(
@@ -123,3 +129,35 @@ def decrypt(value: str | None) -> str:
     except InvalidToken:
         logger.error("Не удалось расшифровать реквизиты: ключ PAYOUT_ENCRYPTION_KEY сменился?")
         return UNREADABLE
+
+
+# ======================================================
+# Формы вывода в fsm_storage (#44)
+# ======================================================
+def seal_form(data: Mapping[str, Any]) -> dict[str, Any]:
+    """Копия данных формы, в которой карта и имя держателя зашифрованы (для записи в БД)."""
+    sealed = dict(data)
+    for field in SENSITIVE_FORM_FIELDS:
+        value = sealed.get(field)
+        if isinstance(value, str) and value:
+            sealed[field] = encrypt(value)
+    return sealed
+
+
+def open_form(data: Mapping[str, Any]) -> dict[str, Any]:
+    """
+    Копия данных формы с расшифрованными реквизитами.
+    Нерасшифровываемое поле удаляется: лучше «Сессия устарела, начните заново»,
+    чем заявка с «⚠️ не расшифровано» вместо номера карты.
+    """
+    opened = dict(data)
+    for field in SENSITIVE_FORM_FIELDS:
+        value = opened.get(field)
+        if not isinstance(value, str):
+            continue
+        plain = decrypt(value)
+        if plain == UNREADABLE:
+            opened.pop(field)
+        else:
+            opened[field] = plain
+    return opened
