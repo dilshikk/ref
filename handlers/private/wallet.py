@@ -5,6 +5,7 @@ from loguru import logger
 from filters import private_only
 from data.settings import get_settings
 from loader import db
+from utils.payout_math import available_balance, pending_total
 
 router = private_only(Router(name="private.wallet"))
 
@@ -26,14 +27,9 @@ async def balance(message: types.Message) -> None:
     total_earned: int = int(record["earned_sum"] or 0) if record else 0
     min_balance = get_settings().min_balance
 
-    # ✅ Защита от None в поле amount
-    pending: int = int(sum(
-        float(row["amount"] or 0) for row in pending_payouts
-    )) if pending_payouts else 0
-
-    # Сумма заявки списывается с баланса только при одобрении, поэтому
-    # вычитаем ожидающие выплаты, чтобы не показывать одни деньги дважды.
-    available: int = max(0, balance_sum - pending)
+    # Расчёт вынесен в utils/payout_math.py и покрыт тестами (#24)
+    pending = pending_total(row["amount"] for row in pending_payouts or [])
+    available = available_balance(balance_sum, pending)
 
     # Кнопку вывода не показываем, пока есть заявка в ожидании:
     # повторная заявка всё равно будет отклонена.
