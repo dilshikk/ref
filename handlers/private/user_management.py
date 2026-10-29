@@ -5,7 +5,8 @@ from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
 from loguru import logger
 
-from data.config import ADMINS, url_yaml
+from data.config import ADMINS
+from data.settings import get_settings
 from filters import private_only
 from filters.admin import IsBotAdminFilter, IsMoneyAdmin
 from loader import db, bot
@@ -226,9 +227,10 @@ async def add_balance_start(call: types.CallbackQuery, state: FSMContext) -> Non
     telegram_id = int(call.data.split("_")[2])
     await state.update_data(target_user_id=telegram_id)
     await state.set_state(UserManagementFlow.add_balance_input)
+    # get_settings(): если цена сохранена строкой "50", раньше выходило "5050505050..." (#22)
     await call.message.answer(
         f"➕ Введите количество приглашений для начисления пользователю <code>{telegram_id}</code>:\n"
-        f"(например: <code>10</code> = +{10 * url_yaml.get('invited_credit', 0)} сум)",
+        f"(например: <code>10</code> = +{10 * get_settings().invited_credit} сум)",
         parse_mode="HTML",
     )
 
@@ -249,7 +251,7 @@ async def add_balance_process(message: types.Message, state: FSMContext) -> None
     before_history = before["history_count"] if before else 0
 
     # Цена фиксируется в момент начисления
-    invited_credit: int = int(url_yaml.get("invited_credit", 0) or 0)
+    invited_credit = get_settings().invited_credit
     await db.add_balance(telegram_id, amount, price=invited_credit)
     after_current = before_current + amount
     after_history = before_history + amount
