@@ -1,6 +1,7 @@
 # services/subscription.py
 """Проверка обязательной подписки на каналы из БД."""
 
+import asyncio
 import time
 from typing import Any, cast
 
@@ -47,20 +48,30 @@ def _cached_result(user_id: int, now: float) -> bool | None:
     return None
 
 
-async def _check_channels(user_id: int) -> bool:
+async def _check_channels(user_id: int, *, fail_closed: bool = False) -> bool:
+    """
+    Каналы проверяются параллельно. fail_closed=False (доступ к боту): если канал
+    проверить нельзя, он пропускается, чтобы ошибка настройки не блокировала всех.
+    fail_closed=True (начисление денег, #18): любая ошибка = НЕ подписан.
+    """
     channels = cast(list[dict[str, Any]], await db.get_all_channels() or [])
-    for channel in channels:
-        channel_id = channel["chat_id"]
-        try:
-            member = await bot.get_chat_member(chat_id=channel_id, user_id=user_id)
-        except TelegramBadRequest as e:
-            # Канал настроен неверно (бот не админ / канал удалён) — не блокируем всех пользователей
-            logger.warning(f"Не удалось проверить подписку на {channel_id}: {e}")
+    if not channels:
+        return True
+    results = await asyncio.gather(
+        *(bot.get_chat_member(chat_id=ch["chat_id"], user_id=user_id) for ch in channels),
+        return_exceptions=True,
+    )
+    for channel, result in zip(channels, results):
+        if isinstance(result, BaseException):
+            if isinstance(result, TelegramBadRequest):
+                # Канал настроен неверно (бот не админ / канал удалён)
+                logger.warning(f"Не удалось проверить подписку на {channel['chat_id']}: {result}")
+            else:
+                logger.error(f"Ошибка проверки подписки {channel['chat_id']}: {result}")
+            if fail_closed:
+                return False
             continue
-        except Exception as e:
-            logger.error(f"Ошибка проверки подписки {channel_id}: {e}")
-            continue
-        if not _is_member_status(member):
+        if not _is_member_status(result):
             return False
     return True
 
@@ -80,3 +91,12 @@ async def is_user_subscribed(user_id: int, use_cache: bool = True) -> bool:
         _subscribed_cache.pop(user_id, None)
         _remember(_not_subscribed_cache, user_id, now)
     return subscribed
+
+
+async def is_user_subscribed_strict(user_id: int) -> bool:
+    """Для начислений: без кэша, любая ошибка проверки = не подписан."""
+    try:
+        return await _check_channels(user_id, fail_closed=True)
+    except Exception as e:
+        logger.warning(f"Строгая проверка подписки не удалась user={user_id}: {e}")
+        return False

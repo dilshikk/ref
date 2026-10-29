@@ -1,4 +1,4 @@
-"""Тесты чтения настроек (#22). Запуск: python -m pytest tests"""
+"""Тесты чтения настроек (#22, #18). Запуск: python -m pytest tests"""
 import importlib.util
 import sys
 import types
@@ -44,8 +44,26 @@ def test_numbers_saved_as_strings_are_accepted(load):
 def test_values_below_minimum_use_default(load):
     s = load({"max_withdraw": 0, "antispam_referral_limit": -5, "min_balance": -1}).get_settings()
     assert s.max_withdraw == 9_999_999
-    assert s.antispam_referral_limit == 100
+    assert s.antispam_referral_limit == 20
     assert s.min_balance == 0
+
+
+def test_antifraud_defaults(load):
+    # #18: лимит в час снижен со 100 до 20, добавлен суточный
+    s = load({}).get_settings()
+    assert s.antispam_referral_limit == 20
+    assert s.antispam_referral_daily_limit == 100
+    assert s.add_min_hours == 24
+    assert s.add_min_score == 2
+
+
+def test_antifraud_values(load):
+    s = load({"antispam_referral_daily_limit": "50", "add_min_hours": 0, "add_min_score": 0}).get_settings()
+    assert s.antispam_referral_daily_limit == 50
+    assert s.add_min_hours == 0
+    assert s.add_min_score == 0
+    assert load({"antispam_referral_daily_limit": 0}).get_settings().antispam_referral_daily_limit == 100
+    assert load({"add_min_hours": "x"}).get_settings().add_min_hours == 24
 
 
 def test_zero_hold_hours_is_allowed(load):

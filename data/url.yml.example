@@ -10,6 +10,14 @@ max_withdraw: 100000
 vote_credit: 500
 url: ''
 support: '@affairme'
-antispam_referral_limit: 100
+# Антифрод: оплачиваемых приглашений в час и за сутки. Сверх лимита — на удержание (/holds)
+antispam_referral_limit: 20
+antispam_referral_daily_limit: 100
 # Если приглашённый выйдет из группы в течение этого числа часов, начисление снимается (0 — снимать всегда)
 referral_hold_hours: 72
+# Добавленный в группу засчитывается в «добавил N участников» только после
+# add_min_hours часов в группе и add_min_score баллов активности:
+# писал в группу +2, запускал бота +2, Premium +2, фото профиля +1, username +1.
+# 0 и 0 — проверка выключена
+add_min_hours: 24
+add_min_score: 2

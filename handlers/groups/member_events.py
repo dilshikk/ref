@@ -12,6 +12,7 @@ from loguru import logger
 from data.config import ADMINS, GROUP_ID
 from data.settings import get_settings
 from loader import db, bot
+from services.group_adds import qualification_enabled
 
 router = Router(name="groups.member_events")
 
@@ -22,11 +23,6 @@ _LEFT_STATUSES = ("left", "kicked")
 
 # referrer_id → (время последнего уведомления, сколько вступлений отклонено с тех пор)
 _antifraud_alerts: dict[int, tuple[float, int]] = {}
-
-
-def _antifraud_limit() -> int:
-    """Лимит рефералов в час из настроек админки (🚨 Антифрод лимит)."""
-    return get_settings().antispam_referral_limit
 
 
 def _referral_hold_hours() -> int:
@@ -99,7 +95,7 @@ async def _send_welcome_dm(user: types.User, group_id: int) -> None:
             logger.warning(f"Не удалось отправить приветствие для user={user.id}: {e}")
 
 
-async def _antifraud_alert(referrer_id: int, count_last_hour: int, limit: int) -> None:
+async def _antifraud_alert(referrer_id: int, count: int, limit: int, period: str) -> None:
     """
     Раньше админы получали отдельное сообщение на КАЖДОЕ вступление сверх лимита —
     при накрутке это сотни сообщений. Теперь — одно уведомление в час на пригласившего,
@@ -124,7 +120,7 @@ async def _antifraud_alert(referrer_id: int, count_last_hour: int, limit: int) -
                 admin_id,
                 f"🚨 <b>Подозрительная активность!</b>\n\n"
                 f"👤 <a href='tg://user?id={referrer_id}'>{referrer_id}</a>\n"
-                f"👥 Приглашено за час: <b>{count_last_hour}</b> (лимит {limit})\n"
+                f"👥 Приглашено {period}: <b>{count}</b> (лимит {limit})\n"
                 f"Вступления сверх лимита отложены «на удержание» и ждут вашей проверки: "
                 f"/holds — список, там же можно начислить или отклонить."
                 f"{skipped_note}\n\n"
@@ -133,6 +129,18 @@ async def _antifraud_alert(referrer_id: int, count_last_hour: int, limit: int) -
             )
         except Exception as e:
             logger.error(f"Не удалось уведомить админа {admin_id}: {e}")
+
+
+async def _exceeded_limit(referrer_id: int) -> tuple[int, int, str] | None:
+    """(сколько приглашено, лимит, «за час»/«за сутки»), если лимит превышен (#18)."""
+    settings = get_settings()
+    hourly = await db.get_referrals_last_hour(referrer_id)
+    if hourly >= settings.antispam_referral_limit:
+        return hourly, settings.antispam_referral_limit, "за час"
+    daily = await db.get_referrals_last_day(referrer_id)
+    if daily >= settings.antispam_referral_daily_limit:
+        return daily, settings.antispam_referral_daily_limit, "за сутки"
+    return None
 
 
 async def credit_referral(
@@ -153,25 +161,25 @@ async def credit_referral(
         logger.info(f"⛔ Реферер {referrer_id} заблокирован — реферал не засчитан.")
         return False
 
-    limit = _antifraud_limit()
-    count_last_hour = await db.get_referrals_last_hour(referrer_id)
-    if count_last_hour >= limit:
+    exceeded = await _exceeded_limit(referrer_id)
+    if exceeded is not None:
+        count, limit, period = exceeded
         # Раньше такие вступления не записывались нигде и терялись навсегда, а
         # пользователю писали «Попробуйте позже». Теперь — «на удержание»: админ
         # проверит и начислит их вручную (/holds).
         held = await db.hold_referral(referrer_id, new_user_id, new_user_name, group_id)
         logger.warning(
-            f"🚨 Антифрод: {referrer_id} пригласил {count_last_hour} за час (лимит {limit}), "
+            f"🚨 Антифрод: {referrer_id} пригласил {count} {period} (лимит {limit}), "
             f"вступление {new_user_id} {'отложено на удержание' if held else 'уже было на удержании'}"
         )
         if not held:
             return False
-        await _antifraud_alert(referrer_id, count_last_hour, limit)
+        await _antifraud_alert(referrer_id, count, limit, period)
         try:
             await bot.send_message(
                 referrer_id,
                 f"⏸ {html.escape(new_user_name)} вступил по вашей ссылке. Вы превысили лимит "
-                f"приглашений за час ({limit}), поэтому начисление отложено на проверку "
+                f"приглашений {period} ({limit}), поэтому начисление отложено на проверку "
                 f"администратором. После проверки деньги будут начислены — повторять ничего не нужно.",
                 parse_mode="HTML",
             )
@@ -245,13 +253,37 @@ async def reverse_referral_on_leave(user: types.User, group_id: int) -> None:
 async def reverse_manual_add_on_leave(user: types.User, group_id: int) -> None:
     """Участник, добавленный вручную, вышел — снимаем его из счётчика «добавил N участников».
     Без этого можно было добавить, удалить и снова добавить одного и того же человека."""
+    hold_hours = _referral_hold_hours()
     try:
-        inviter_id = await db.reverse_manual_add_on_leave(group_id, user.id, _referral_hold_hours())
+        # Добавленные до #18 (group_manual_adds)
+        inviter_id = await db.reverse_manual_add_on_leave(group_id, user.id, hold_hours)
+        # Добавленные после #18 (pending_group_adds): непроверенный просто отклоняется
+        inviter_id = await db.release_pending_add_on_leave(group_id, user.id, hold_hours) or inviter_id
     except Exception as e:
         logger.error(f"Ошибка снятия ручного добавления [user={user.id}]: {e}")
         return
     if inviter_id:
         logger.info(f"↩️ Ручное добавление снято: {user.id} вышел → inviter={inviter_id}")
+
+
+async def _count_added_member(group_id: int, inviter_id: int, member_id: int, source: str) -> None:
+    """
+    +1 к «добавил N участников». С проверкой (#18) — сначала «на проверку»:
+    счётчик вырастет, когда участник пробудет в группе и проявит активность
+    (services/group_adds.py, по кнопке «✅ Я добавил(а)»).
+    """
+    if qualification_enabled():
+        if await db.add_pending_group_add(group_id, inviter_id, member_id, source):
+            logger.info(f"⏳ {member_id} ждёт проверки, добавил {inviter_id} ({source})")
+        else:
+            logger.info(f"↪️ {member_id} уже учитывался ранее — счётчик {inviter_id} не меняется")
+        return
+    if source == "referral":
+        await db.add_or_update_group_member(group_id, inviter_id)
+    elif await db.credit_manual_add_once(group_id, inviter_id, member_id):
+        logger.info(f"➕ {inviter_id} добавил {member_id} вручную")
+    else:
+        logger.info(f"↪️ {member_id} уже засчитан ранее — счётчик {inviter_id} не меняется")
 
 
 @router.chat_member(ChatGroupFilter())
@@ -309,12 +341,9 @@ async def on_user_join(event: types.ChatMemberUpdated) -> None:
             try:
                 # Каждый человек засчитывается добавившему только один раз: повторное
                 # добавление того же участника (после удаления) счётчик не увеличивает
-                if await db.credit_manual_add_once(group_id, inviter.id, user.id):
-                    logger.info(f"➕ {inviter.full_name} добавил {user.full_name} вручную")
-                else:
-                    logger.info(f"↪️ {user.full_name} уже засчитан ранее — счётчик {inviter.id} не меняется")
+                await _count_added_member(group_id, inviter.id, user.id, "manual")
             except Exception as e:
-                logger.error(f"Ошибка credit_manual_add_once: {e}")
+                logger.error(f"Ошибка учёта ручного добавления: {e}")
         await _send_welcome_dm(user, group_id)
         return
 
@@ -342,7 +371,7 @@ async def on_user_join(event: types.ChatMemberUpdated) -> None:
         # Счётчик «добавил в группу» растёт только при реальном начислении,
         # иначе повторное событие от Telegram засчитало бы участника дважды
         if await credit_referral(referrer_id, user.id, user.full_name, group_id):
-            await db.add_or_update_group_member(group_id, referrer_id)
+            await _count_added_member(group_id, referrer_id, user.id, "referral")
     except Exception as e:
         logger.error(f"Ошибка credit_referral [user={user.id}, ref={referrer_id}]: {e}")
 
@@ -352,6 +381,8 @@ async def on_user_join(event: types.ChatMemberUpdated) -> None:
 # Обработчика всех сообщений группы здесь больше нет: он стоял раньше
 # onboarding.group_router и забирал каждое сообщение себе, поэтому бот никогда
 # не отвечал в группе на «привет»/«спасибо», а лог засорялся предупреждениями.
+# Активность в группе (для проверки добавленных, #18) записывает
+# middlewares/group_activity.py — он не забирает сообщения у обработчиков.
 
 
 @router.my_chat_member(ChatGroupFilter())

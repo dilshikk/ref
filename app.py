@@ -37,10 +37,15 @@ def setup_middlewares(dispatcher: Dispatcher) -> None:
     from middlewares.blocked import BlockedUserMiddleware
     from middlewares.subscription import SubscriptionMiddleware
     from middlewares.text_input import TextInputGuardMiddleware
+    from middlewares.group_activity import GroupActivityMiddleware
 
     action_logger = ActionLoggerMiddleware()
     blocked_guard = BlockedUserMiddleware()
     subscription_guard = SubscriptionMiddleware()
+
+    # Кто пишет в группу — признак живого участника при проверке «добавил N» (#18).
+    # Outer-middleware видит каждое сообщение и не забирает его у обработчиков.
+    dispatcher.message.outer_middleware(GroupActivityMiddleware())
 
     # Блокировка проверяется первой — заблокированный пользователь не доходит до хэндлеров
     dispatcher.message.middleware(blocked_guard)
@@ -86,6 +91,10 @@ async def database_connected() -> None:
     await db.create_table_group_manual_adds()
     # Вступления сверх антифрод-лимита ждут решения админа, а не теряются
     await db.create_table_referral_holds()
+    # Антифрод (#18): блокировка после неверной капчи, проверка добавленных, активность в группе
+    await db.create_table_withdraw_captcha_state()
+    await db.create_table_pending_group_adds()
+    await db.create_table_group_member_activity()
     # Состояния форм (переживают перезапуск)
     await fsm_storage.create_table()
 
