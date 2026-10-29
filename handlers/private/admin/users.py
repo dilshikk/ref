@@ -1,18 +1,22 @@
 # handlers/private/admin/users.py
 """👥 Пользователи: списки, заблокированные, администраторы, рефералы.
-Поиск и изменение баланса — в handlers/private/user_management.py."""
+Поиск, профиль и изменение баланса — в handlers/private/user_management.py."""
 import html
 from typing import Any, cast
 from aiogram import Router, types, F
+from aiogram.fsm.context import FSMContext
 from filters import private_only
 from keyboards.reply_keyboards import users_kb
 from loader import db
-from filters.admin import IsBotAdminFilter
+from filters.admin import IsBotAdminFilter, IsMoneyAdmin
 from data.config import ADMINS
+from states.flows import UserManagementFlow
 
 from .common import blocked_users_text
 
 router = private_only(Router(name="private.admin.users"))
+
+_ASK_USER = "Введите ID, @username или имя пользователя:"
 
 
 @router.message(F.text == "👥 Пользователи", IsBotAdminFilter(ADMINS))
@@ -30,6 +34,25 @@ async def users_list_alias(message: types.Message) -> None:
     from ..user_management import users_list_start
 
     await users_list_start(message)
+
+
+@router.message(F.text == "💰 Изменить баланс", IsBotAdminFilter(ADMINS))
+async def users_change_balance(message: types.Message, state: FSMContext) -> None:
+    # #76: денежные операции — только MONEY_ADMINS (#23); кнопки в профиле проверяют это ещё раз
+    if not await IsMoneyAdmin()(message):
+        await message.answer("⛔ Изменять баланс могут только денежные админы.", reply_markup=users_kb())
+        return
+    await state.set_state(UserManagementFlow.search_input)
+    await state.update_data(search_purpose="balance")
+    await message.answer(f"💰 Изменение баланса.\n{_ASK_USER}")
+
+
+@router.message(F.text == "📨 Отправить сообщение", IsBotAdminFilter(ADMINS))
+async def users_send_message(message: types.Message, state: FSMContext) -> None:
+    # #77: после выбора пользователя сразу открывается ввод текста (user_management.py)
+    await state.set_state(UserManagementFlow.search_input)
+    await state.update_data(search_purpose="message")
+    await message.answer(f"📨 Отправить сообщение.\n{_ASK_USER}")
 
 
 @router.message(F.text == "🚫 Заблокированные пользователи", IsBotAdminFilter(ADMINS))

@@ -1,10 +1,11 @@
 # handlers/private/admin/bot.py
-"""🤖 Бот: тексты, опросы, команды меню.
+"""🤖 Бот: тексты, опросы, ссылка голосования, реферальные настройки, команды меню.
 Заглушки «🏠 Главное меню», «🌍 Языки», «📢 Уведомления» удалены (#87, #89, #90):
 их кнопок нет ни на одной клавиатуре."""
 from typing import Any, cast
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from filters import private_only
 from keyboards.reply_keyboards import (
     bot_kb,
@@ -115,21 +116,132 @@ async def update_text_template(message: types.Message, state: FSMContext):
     await state.clear()
 
 
+# ─────────────────────────────────────────────
+# 🎁 Реферальные настройки (#85): раньше только показ, теперь инлайн-панель
+# по образцу «💰 Тарифы». Ключи совпадают с полями Settings и ключами url.yml.
+# ─────────────────────────────────────────────
+_REFERRAL_FIELDS: dict[str, dict[str, Any]] = {
+    "invited_credit": {"label": "Сумма за приглашение", "unit": "сум", "minimum": 0},
+    "antispam_referral_limit": {"label": "Лимит в час", "unit": "чел.", "minimum": 1},
+    "antispam_referral_daily_limit": {"label": "Лимит в сутки", "unit": "чел.", "minimum": 1},
+    "referral_hold_hours": {"label": "Снятие при выходе в течение", "unit": "ч.", "minimum": 0},
+}
+
+
+def _referral_value(key: str) -> int:
+    return int(getattr(get_settings(), key))
+
+
+def _referral_text() -> str:
+    lines = [
+        f"{field['label']}: <b>{_referral_value(key)}</b> {field['unit']}"
+        for key, field in _REFERRAL_FIELDS.items()
+    ]
+    return (
+        "🎁 <b>Реферальные настройки</b>\n\n"
+        + "\n".join(lines)
+        + "\n\nВступления сверх лимита не теряются — они ждут решения в «⏸ На удержании».\n"
+        "«Снятие при выходе»: 0 — начисление снимается при любом выходе из группы.\n\n"
+        "Выберите параметр и отправьте новое число."
+    )
+
+
+def _referral_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"✏️ {field['label']}", callback_data=f"ref_edit:{key}")]
+        for key, field in _REFERRAL_FIELDS.items()
+    ])
+
+
+def _referral_cancel_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="ref_edit_cancel")]]
+    )
+
+
 @router.message(F.text == "🎁 Реферальные настройки", IsBotAdminFilter(ADMINS))
 async def bot_referral_menu(message: types.Message):
-    # get_settings(): те же значения, по которым бот реально начисляет (#49).
-    # Кнопка есть и в «🤖 Бот», и в «⚙️ Настройки»: клавиатуру не меняем,
-    # чтобы админ остался в том разделе, откуда пришёл (раньше всегда открывались «Настройки»).
-    settings = get_settings()
-    await message.answer(
-        "🎁 <b>Реферальные настройки</b>\n\n"
-        f"Сумма за приглашение: <b>{settings.invited_credit}</b>\n"
-        f"Антифрод-лимит: <b>{settings.antispam_referral_limit}</b> в час, "
-        f"<b>{settings.antispam_referral_daily_limit}</b> в сутки\n\n"
-        "Изменить сумму — «⚙️ Настройки» → «💰 Тарифы».\n"
-        "Изменить лимит в час — «🔒 Безопасность» → «🛡 Антиспам».",
-        parse_mode="HTML",
+    # Кнопка есть и в «🤖 Бот», и в «⚙️ Настройки»: reply-клавиатуру не меняем,
+    # чтобы админ остался в том разделе, откуда пришёл.
+    await message.answer(_referral_text(), parse_mode="HTML", reply_markup=_referral_kb())
+
+
+@router.callback_query(F.data.startswith("ref_edit:"), IsBotAdminFilter(ADMINS))
+async def ref_edit_callback(call: types.CallbackQuery, state: FSMContext):
+    if call.message is None or not call.data:
+        return
+    key = call.data.split(":", 1)[1]
+    field = _REFERRAL_FIELDS.get(key)
+    if field is None:
+        await call.answer("Неизвестный параметр")
+        return
+    await state.update_data(
+        referral_key=key,
+        referral_panel_chat_id=call.message.chat.id,
+        referral_panel_message_id=call.message.message_id,
     )
+    await state.set_state(AdminFlow.set_referral_value)
+    await cast(Any, call.message).answer(
+        f"Введите новое значение для «{field['label']}» (целое число, не меньше {field['minimum']}).\n"
+        f"Сейчас: <b>{_referral_value(key)}</b>",
+        parse_mode="HTML",
+        reply_markup=_referral_cancel_kb(),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "ref_edit_cancel", IsBotAdminFilter(ADMINS))
+async def ref_edit_cancel(call: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    if call.message is not None:
+        await cast(Any, call.message).edit_reply_markup(reply_markup=None)
+    await call.answer("Редактирование отменено")
+
+
+@forms_router.message(AdminFlow.set_referral_value, IsBotAdminFilter(ADMINS))
+async def ref_value_input(message: types.Message, state: FSMContext):
+    user = message.from_user
+    if user is None:
+        return
+    data = await state.get_data()
+    key = str(data.get("referral_key") or "")
+    field = _REFERRAL_FIELDS.get(key)
+    if field is None:
+        await message.answer("⚠️ Сессия истекла. Откройте «🎁 Реферальные настройки» снова.")
+        await state.clear()
+        return
+
+    raw = (message.text or "").strip()
+    if not raw.isdigit() or int(raw) < int(field["minimum"]):
+        await message.answer(
+            f"❌ Введите целое число не меньше {field['minimum']}.",
+            reply_markup=_referral_cancel_kb(),
+        )
+        return
+
+    value = int(raw)
+    old_value = url_yaml.get(key)
+    url_yaml[key] = value
+    save_url_yaml()
+    await record_setting_change(user.id, key, old_value, value)
+
+    # Обновляем исходную панель, чтобы админ сразу видел новое значение
+    chat_id = data.get("referral_panel_chat_id")
+    message_id = data.get("referral_panel_message_id")
+    if message.bot is not None and isinstance(chat_id, int) and isinstance(message_id, int):
+        try:
+            await message.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=_referral_text(),
+                parse_mode="HTML",
+                reply_markup=_referral_kb(),
+            )
+        except Exception:
+            await message.answer(_referral_text(), parse_mode="HTML", reply_markup=_referral_kb())
+
+    await message.answer(f"✅ {field['label']}: <b>{value}</b> {field['unit']}", parse_mode="HTML")
+    await state.clear()
 
 
 @router.message(F.text == "🗳 Опросы", IsBotAdminFilter(ADMINS))
