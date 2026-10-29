@@ -10,6 +10,7 @@
 Теперь все читают get_settings(): типы и умолчания описаны здесь один раз.
 Настройки читаются при каждом вызове, поэтому изменения из админки действуют сразу.
 """
+import html
 from dataclasses import dataclass
 
 from loguru import logger
@@ -38,6 +39,11 @@ DEFAULT_POLL_QUESTION = "Насколько вам удобен наш бот?"
 DEFAULT_POLL_OPTIONS: tuple[str, ...] = ("Отлично", "Нормально", "Нужно улучшить")
 _MAX_POLL_OPTIONS = 10  # ограничение Telegram
 
+# Шаблоны «📝 Тексты» (#88): какие тексты админ может заменить своими
+TEXT_TEMPLATE_KEYS: tuple[str, ...] = ("start", "help", "support")
+# Подстановка имени пользователя в шаблон
+NAME_PLACEHOLDER = "{name}"
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -57,6 +63,7 @@ class Settings:
     support: str                 # контакт поддержки
     poll_question: str
     poll_options: tuple[str, ...]
+    text_templates: dict[str, str]  # непустые шаблоны из «📝 Тексты» (#88)
 
 
 def _int(key: str, default: int, minimum: int = 0) -> int:
@@ -96,6 +103,22 @@ def _poll_options() -> tuple[str, ...]:
     return tuple(options[:_MAX_POLL_OPTIONS])
 
 
+def _text_templates() -> dict[str, str]:
+    """Только известные ключи и непустые строки: пустой шаблон = текст по умолчанию."""
+    raw = url_yaml.get("text_templates")
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key in TEXT_TEMPLATE_KEYS:
+        value = raw.get(key)
+        if value is None or isinstance(value, (dict, list, bool)):
+            continue
+        text = str(value).strip()
+        if text:
+            out[key] = text
+    return out
+
+
 def get_settings() -> Settings:
     return Settings(
         invited_credit=_int("invited_credit", DEFAULT_INVITED_CREDIT),
@@ -116,7 +139,21 @@ def get_settings() -> Settings:
         support=_str("support"),
         poll_question=_str("poll_question") or DEFAULT_POLL_QUESTION,
         poll_options=_poll_options(),
+        text_templates=_text_templates(),
     )
+
+
+def custom_text(key: str, name: str = "") -> str | None:
+    """
+    Текст из «📝 Тексты» (#88), готовый к отправке с parse_mode="HTML", или None,
+    если админ его не задавал (тогда используется текст по умолчанию).
+    Шаблон экранируется целиком: символы < > & из админки не ломают сообщение.
+    {name} заменяется на имя пользователя (тоже экранированное).
+    """
+    raw = get_settings().text_templates.get(key)
+    if not raw:
+        return None
+    return html.escape(raw).replace(NAME_PLACEHOLDER, html.escape(name))
 
 
 def is_http_url(value: str) -> bool:

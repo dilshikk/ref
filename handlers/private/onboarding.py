@@ -9,7 +9,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from loguru import logger
 
 from filters import private_only
-from data.settings import get_settings
+from data.settings import custom_text, get_settings
 from keyboards.inline_keyboards.actions import subscribe_keyboard_invited, subscribe_keyboard
 from keyboards.reply_keyboards.menu import menu_kb
 from loader import db
@@ -29,6 +29,10 @@ _UNKNOWN_TEXT = (
 
 
 def _start_pitch(full_name: str) -> str:
+    # #88: текст из «📝 Тексты», если админ его задал ({name} — имя пользователя)
+    custom = custom_text("start", full_name)
+    if custom:
+        return custom
     # get_settings(): нечисловое значение в url.yml больше не роняет /start (#22)
     settings = get_settings()
     # Имя экранируем: символы < > & в имени ломали HTML, Telegram отклонял
