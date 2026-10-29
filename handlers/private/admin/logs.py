@@ -150,11 +150,13 @@ async def _fetch_logs_page(category: str, days: int, offset: int) -> tuple[str, 
         return "📢 Логи групп", lines, len(rows) > LOGS_PAGE_SIZE
 
     if category == "bot":
+        # handler_error показывается в «❌ Ошибки», здесь не дублируем
         rows = cast(list[dict[str, Any]], await db.execute(
             """
             SELECT created_at, actor_id, actor_type, action, entity_type, entity_id, payload
             FROM audit_logs
             WHERE created_at >= NOW() - make_interval(days => $1)
+              AND action <> 'handler_error'
               AND (
                 actor_type = 'system'
                 OR entity_type = 'bot'
@@ -202,7 +204,8 @@ async def _fetch_logs_page(category: str, days: int, offset: int) -> tuple[str, 
         ]
         return "⚙️ Логи настроек", lines, len(rows) > LOGS_PAGE_SIZE
 
-    # errors
+    # errors: ошибки обработчиков (handler_error, пишет handlers/errors/error_router.py)
+    # и упавшие плановые рассылки
     rows = cast(list[dict[str, Any]], await db.execute(
         """
         SELECT created_at, source, summary, details
@@ -279,24 +282,14 @@ async def _open_logs_view(
 
 @router.message(F.text == "📋 Логи", IsBotAdminFilter(ADMINS))
 async def logs_menu(message: types.Message):
-    await message.answer(
-        "📋 <b>Логи</b>\n\n"
-        "В этой версии логирование доступно в консоли сервера и через middleware."
-        " Если нужен просмотр логов внутри бота, это лучше вынести в отдельное хранилище.",
-        parse_mode="HTML",
-        reply_markup=logs_kb(),
-    )
-
-
-@router.message(F.text == "📋 Показать логи", IsBotAdminFilter(ADMINS))
-async def logs_placeholder(message: types.Message):
+    # #95: вместо устаревшего «логи только в консоли» — сводка за сутки
     activity_today = await db.count_activity_events_since(1)
     audit_today = await db.count_audit_logs_since(1)
     await message.answer(
         "📋 <b>Логи</b>\n\n"
         f"Событий активности за 24ч: <b>{activity_today}</b>\n"
         f"Аудит-записей за 24ч: <b>{audit_today}</b>\n\n"
-        "Выберите категорию ниже. Для каждой категории доступны фильтры 24ч/7д/30д и пагинация.",
+        "Выберите категорию ниже. Для каждой категории доступны фильтры 24ч/7д/30д и листание.",
         parse_mode="HTML",
         reply_markup=logs_kb(),
     )
