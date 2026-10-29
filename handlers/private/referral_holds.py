@@ -22,6 +22,9 @@ from services.audit_log import audit_log_service
 
 router = private_only(Router(name="private.referral_holds"))
 
+# Текст кнопки из finance_kb (keyboards/reply_keyboards/admin_menu.py)
+HOLDS_BUTTON = "⏸ На удержании"
+
 
 def _decision_kb(referrer_id: int) -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(inline_keyboard=[[
@@ -35,6 +38,8 @@ def _parse_referrer(data: str) -> int | None:
     return int(tail) if tail.isdigit() else None
 
 
+# Два декоратора: команда /holds и кнопка в разделе «Финансы» ведут в один обработчик
+@router.message(F.text == HOLDS_BUTTON, IsBotAdminFilter(ADMINS))
 @router.message(Command("holds"), IsBotAdminFilter(ADMINS))
 async def list_holds(message: types.Message) -> None:
     rows = cast(list[dict[str, Any]], await db.list_pending_referral_holds() or [])
