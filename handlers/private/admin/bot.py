@@ -1,5 +1,7 @@
 # handlers/private/admin/bot.py
-"""🤖 Бот: тексты, опросы, команды меню."""
+"""🤖 Бот: тексты, опросы, команды меню.
+Заглушки «🏠 Главное меню», «🌍 Языки», «📢 Уведомления» удалены (#87, #89, #90):
+их кнопок нет ни на одной клавиатуре."""
 from typing import Any, cast
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
@@ -7,7 +9,6 @@ from filters import private_only
 from keyboards.reply_keyboards import (
     bot_kb,
     bot_menu_settings_kb,
-    settings_kb,
 )
 from loader import db
 from states.flows import AdminFlow
@@ -27,16 +28,6 @@ async def bot_menu(message: types.Message):
     await message.answer(
         "🤖 <b>Бот</b>\n\n"
         "Команды и служебные настройки бота.",
-        parse_mode="HTML",
-        reply_markup=bot_kb(),
-    )
-
-
-@router.message(F.text == "🏠 Главное меню", IsBotAdminFilter(ADMINS))
-async def bot_main_menu(message: types.Message):
-    await message.answer(
-        "🏠 <b>Главное меню бота</b>\n\n"
-        "Здесь можно управлять текстами, языками, уведомлениями и реферальной логикой.",
         parse_mode="HTML",
         reply_markup=bot_kb(),
     )
@@ -124,37 +115,20 @@ async def update_text_template(message: types.Message, state: FSMContext):
     await state.clear()
 
 
-@router.message(F.text == "🌍 Языки", IsBotAdminFilter(ADMINS))
-async def bot_languages_menu(message: types.Message):
-    await message.answer(
-        "🌍 <b>Языки</b>\n\n"
-        "В таблице пользователей уже есть поле language, но админ-управление им ещё не вынесено.",
-        parse_mode="HTML",
-        reply_markup=bot_kb(),
-    )
-
-
 @router.message(F.text == "🎁 Реферальные настройки", IsBotAdminFilter(ADMINS))
 async def bot_referral_menu(message: types.Message):
-    # get_settings(): те же значения, по которым бот реально начисляет (#49)
+    # get_settings(): те же значения, по которым бот реально начисляет (#49).
+    # Кнопка есть и в «🤖 Бот», и в «⚙️ Настройки»: клавиатуру не меняем,
+    # чтобы админ остался в том разделе, откуда пришёл (раньше всегда открывались «Настройки»).
     settings = get_settings()
     await message.answer(
         "🎁 <b>Реферальные настройки</b>\n\n"
         f"Сумма за приглашение: <b>{settings.invited_credit}</b>\n"
         f"Антифрод-лимит: <b>{settings.antispam_referral_limit}</b> в час, "
-        f"<b>{settings.antispam_referral_daily_limit}</b> в сутки",
+        f"<b>{settings.antispam_referral_daily_limit}</b> в сутки\n\n"
+        "Изменить сумму — «⚙️ Настройки» → «💰 Тарифы».\n"
+        "Изменить лимит в час — «🔒 Безопасность» → «🛡 Антиспам».",
         parse_mode="HTML",
-        reply_markup=settings_kb(),
-    )
-
-
-@router.message(F.text == "📢 Уведомления", IsBotAdminFilter(ADMINS))
-async def bot_notifications_menu(message: types.Message):
-    await message.answer(
-        "📢 <b>Уведомления</b>\n\n"
-        "Сейчас уведомления администраторам отправляются при старте бота.",
-        parse_mode="HTML",
-        reply_markup=bot_kb(),
     )
 
 

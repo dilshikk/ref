@@ -10,6 +10,8 @@ from loader import db
 from filters.admin import IsBotAdminFilter
 from data.config import ADMINS
 
+from .common import blocked_users_text
+
 router = private_only(Router(name="private.admin.users"))
 
 
@@ -32,14 +34,8 @@ async def users_list_alias(message: types.Message) -> None:
 
 @router.message(F.text == "🚫 Заблокированные пользователи", IsBotAdminFilter(ADMINS))
 async def blocked_users_menu(message: types.Message):
-    users = cast(list[dict[str, Any]], await db.select_all_users() or [])
-    blocked = [user for user in users if user.get("is_blocked")]
-    text = (
-        f"🚫 <b>Заблокированные пользователи</b>\n\nВсего: <b>{len(blocked)}</b>"
-        if blocked
-        else "🚫 <b>Заблокированные пользователи</b>\n\nСейчас заблокированных пользователей нет."
-    )
-    await message.answer(text, parse_mode="HTML", reply_markup=users_kb())
+    # #78: список с переходом в профиль, а не только число
+    await message.answer(await blocked_users_text(), parse_mode="HTML", reply_markup=users_kb())
 
 
 @router.message(F.text == "👑 Администраторы", IsBotAdminFilter(ADMINS))

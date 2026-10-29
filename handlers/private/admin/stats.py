@@ -1,5 +1,7 @@
 # handlers/private/admin/stats.py
-"""📊 Статистика: общая сводка, новые пользователи, активность, периоды."""
+"""📊 Статистика: общая сводка, новые пользователи, активность, периоды.
+Заглушки «📢 Каналы» и «💳 Финансы» заменены настоящими данными (#73, #84)."""
+import html
 from typing import Any, cast
 from aiogram import Router, types, F
 from aiogram.types import ReplyKeyboardMarkup
@@ -8,6 +10,7 @@ from keyboards.reply_keyboards import stats_kb
 from loader import db
 from filters.admin import IsBotAdminFilter
 from data.config import ADMINS
+from data.settings import get_settings
 from services.activity import activity_service
 
 from .common import (
@@ -15,7 +18,6 @@ from .common import (
     get_finance_totals,
     get_referral_totals,
     get_user_totals,
-    show_placeholder,
 )
 
 router = private_only(Router(name="private.admin.stats"))
@@ -23,6 +25,11 @@ router = private_only(Router(name="private.admin.stats"))
 
 async def _show_main_section(message: types.Message, text: str, keyboard: ReplyKeyboardMarkup) -> None:
     await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+
+
+async def _count(sql: str) -> int:
+    row = cast(dict[str, Any] | None, await db.execute(sql, fetchone=True))
+    return int((row or {}).get("count") or 0)
 
 
 @router.message(F.text == "📊 Статистика", IsBotAdminFilter(ADMINS))
@@ -57,16 +64,14 @@ async def stats_new_users(message: types.Message):
     new_7d = await db.count_new_users_since(7)
     new_30d = await db.count_new_users_since(30)
 
-    yesterday_row = cast(dict[str, Any] | None, await db.execute(
+    yesterday = await _count(
         """
         SELECT COUNT(*) AS count
         FROM Users
         WHERE created_at >= NOW() - INTERVAL '48 hours'
           AND created_at < NOW() - INTERVAL '24 hours'
-        """,
-        fetchone=True,
-    ))
-    yesterday = int(yesterday_row["count"] or 0) if yesterday_row else 0
+        """
+    )
     trend = new_1d - yesterday
     if trend > 0:
         trend_text = f"📈 +{trend} к вчера"
@@ -109,36 +114,61 @@ async def stats_activity(message: types.Message):
 
 @router.message(F.text == "📢 Каналы", IsBotAdminFilter(ADMINS))
 async def stats_channels(message: types.Message):
-    channels = await get_channel_totals()
-    await show_placeholder(
-        message,
-        "📢 Каналы",
-        f"Всего подключено: <b>{channels['total_channels']}</b>.",
-        stats_kb(),
+    # #73: список обязательных каналов вместо одного числа
+    channels = cast(list[dict[str, Any]], await db.get_all_channels() or [])
+    settings = get_settings()
+    if not channels:
+        body = (
+            "Обязательные каналы не добавлены.\n"
+            "Добавить: «📢 Каналы и группы» → «📌 Подписки»."
+        )
+    else:
+        lines = [
+            f"{i}. <code>{html.escape(str(ch['chat_id']))}</code> — {html.escape(str(ch['link']))}"
+            for i, ch in enumerate(channels, start=1)
+        ]
+        body = f"Обязательных каналов: <b>{len(channels)}</b>\n\n" + "\n".join(lines)
+    await message.answer(
+        "📢 <b>Каналы</b>\n\n"
+        f"{body}\n\n"
+        f"👤 Нужно добавить в группу для вывода: <b>{settings.group_member_count}</b>",
+        parse_mode="HTML",
+        reply_markup=stats_kb(),
+        disable_web_page_preview=True,
     )
 
 
 @router.message(F.text == "💳 Финансы", IsBotAdminFilter(ADMINS))
 async def stats_finance(message: types.Message):
-    payouts = await get_finance_totals()
-    await show_placeholder(
-        message,
-        "💳 Финансы",
-        f"Ожидают выплат: <b>{payouts['pending_payouts']}</b>\n"
-        f"Балансовых единиц в системе: <b>{payouts['balance_units']}</b>.",
-        stats_kb(),
+    # #84: суммы в деньгах, а не количество приглашённых
+    f = await get_finance_totals()
+    debt_line = f"⚠️ Долги пользователей: <b>{f['debt_sum']}</b> сум\n" if f["debt_sum"] > 0 else ""
+    await message.answer(
+        "💳 <b>Финансы</b>\n\n"
+        f"💸 Ожидают выплаты: <b>{f['pending_payouts']}</b> заявок на <b>{f['pending_sum']}</b> сум\n"
+        f"✅ Выплачено всего: <b>{f['approved_payouts']}</b> заявок на <b>{f['approved_sum']}</b> сум\n"
+        f"📅 Выплачено по заявкам за 30 дней: <b>{f['approved_30d_sum']}</b> сум\n\n"
+        f"💵 На балансах пользователей: <b>{f['balance_sum']}</b> сум\n"
+        f"{debt_line}"
+        f"📊 Начислено за всё время: <b>{f['earned_sum']}</b> сум",
+        parse_mode="HTML",
+        reply_markup=stats_kb(),
     )
 
 
 @router.message(F.text == "🎁 Реферальная статистика", IsBotAdminFilter(ADMINS))
 async def stats_referrals(message: types.Message):
     referrals = await get_referral_totals()
-    await show_placeholder(
-        message,
-        "🎁 Реферальная статистика",
+    on_hold = await _count("SELECT COUNT(*) AS count FROM referral_holds WHERE status = 'pending'")
+    reversed_count = await _count("SELECT COUNT(*) AS count FROM UserInviteMember WHERE reversed_at IS NOT NULL")
+    await message.answer(
+        "🎁 <b>Реферальная статистика</b>\n\n"
         f"Всего приглашений: <b>{referrals['total_referrals']}</b>\n"
-        f"Текущий активный счётчик: <b>{referrals['current_referrals']}</b>.",
-        stats_kb(),
+        f"Текущий активный счётчик: <b>{referrals['current_referrals']}</b>\n"
+        f"⏸ На удержании (ждут решения): <b>{on_hold}</b>\n"
+        f"↩️ Снято за выход из группы: <b>{reversed_count}</b>",
+        parse_mode="HTML",
+        reply_markup=stats_kb(),
     )
 
 
@@ -154,27 +184,10 @@ async def stats_timeframes(message: types.Message):
     days = period_map.get(title)
 
     if days is None:
-        users_row = cast(dict[str, Any] | None, await db.execute(
-            "SELECT COUNT(*) AS count FROM Users",
-            fetchone=True,
-        ))
-        active_row = cast(dict[str, Any] | None, await db.execute(
-            "SELECT COUNT(DISTINCT user_id) AS count FROM user_activity",
-            fetchone=True,
-        ))
-        activity_events_row = cast(dict[str, Any] | None, await db.execute(
-            "SELECT COUNT(*) AS count FROM user_activity",
-            fetchone=True,
-        ))
-        audit_events_row = cast(dict[str, Any] | None, await db.execute(
-            "SELECT COUNT(*) AS count FROM audit_logs",
-            fetchone=True,
-        ))
-
-        total_users = int(users_row["count"] or 0) if users_row else 0
-        active_users = int(active_row["count"] or 0) if active_row else 0
-        activity_events = int(activity_events_row["count"] or 0) if activity_events_row else 0
-        audit_events = int(audit_events_row["count"] or 0) if audit_events_row else 0
+        total_users = await _count("SELECT COUNT(*) AS count FROM Users")
+        active_users = await _count("SELECT COUNT(DISTINCT user_id) AS count FROM user_activity")
+        activity_events = await _count("SELECT COUNT(*) AS count FROM user_activity")
+        audit_events = await _count("SELECT COUNT(*) AS count FROM audit_logs")
 
         text = (
             f"<b>{title}</b>\n\n"
