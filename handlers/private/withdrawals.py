@@ -9,7 +9,8 @@ from aiogram.fsm.context import FSMContext
 from loguru import logger
 
 from filters import private_only
-from data.config import ADMINS, GROUP_ID, MONEY_ADMINS, url_yaml
+from data.config import ADMINS, GROUP_ID, MONEY_ADMINS
+from data.settings import get_settings
 from loader import db
 from states.flows import WithdrawalFlow
 from services.activity import activity_service
@@ -20,19 +21,6 @@ router = private_only(Router(name="private.withdrawals"))
 
 # ✅ WeakValueDictionary — неактивные локи удаляются автоматически
 user_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
-
-
-def _cfg_int(key: str, default: int) -> int:
-    """Число из url.yml. Админка может сохранить значение строкой ("5000"),
-    и тогда сравнение баланса с ним падало с ошибкой — пользователь не получал ответа."""
-    value = url_yaml.get(key)
-    if value is None or value == "":
-        return default
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        logger.warning(f"url.yml: {key}={value!r} не число, используется {default}")
-        return default
 
 
 def _mask_payment_info(value: str | None) -> str:
@@ -62,8 +50,10 @@ async def _do_withdraw(user_id: int, reply_target: types.Message, state: FSMCont
         try:
             record = await db.get_user_invited_count(user_id)
 
-            min_balance = _cfg_int("min_balance", 0)
-            max_withdraw = _cfg_int("max_withdraw", 9_999_999)
+            # get_settings(): строка "5000" или мусор в url.yml не роняют сравнение (#22)
+            settings = get_settings()
+            min_balance = settings.min_balance
+            max_withdraw = settings.max_withdraw
             # Баланс хранится в деньгах: смена цены за реферала его не пересчитывает
             balance = int(record["balance_sum"] or 0) if record else 0
 
@@ -158,18 +148,23 @@ async def check_captcha(message: types.Message, state: FSMContext) -> None:
         await message.reply("❌ Неверно! Попробуйте ещё раз.")
         return
 
-    required_members = _cfg_int("group_member_count", 3)
-    group_link: str = url_yaml.get("subcr_channel", "")
+    settings = get_settings()
+    required_members = settings.group_member_count
 
-    markup = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="👥 Перейти в группу", url=group_link)],
-        [types.InlineKeyboardButton(text="✅ Я добавил(а)", callback_data="check_group_members")],
-    ])
+    rows: list[list[types.InlineKeyboardButton]] = []
+    # Кнопка-ссылка с пустым или не-http адресом роняла отправку сообщения:
+    # без ссылки на группу показываем только «Я добавил(а)»
+    if settings.group_link.startswith(("http://", "https://", "tg://")):
+        rows.append([types.InlineKeyboardButton(text="👥 Перейти в группу", url=settings.group_link)])
+    else:
+        logger.warning("url.yml: subcr_channel не задан или не ссылка — кнопка группы скрыта")
+    rows.append([types.InlineKeyboardButton(text="✅ Я добавил(а)", callback_data="check_group_members")])
+
     await message.answer(
         f"📢 Добавьте <b>{required_members}</b> участников в группу, "
         "затем нажмите «✅ Я добавил(а)».",
         parse_mode="HTML",
-        reply_markup=markup,
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=rows),
     )
     await state.set_state(WithdrawalFlow.CARD)
 
@@ -184,7 +179,7 @@ async def check_group_members(call: types.CallbackQuery, state: FSMContext) -> N
     # Та же группа, в которой бот считает добавленных (GROUP_ID из .env).
     # Раньше здесь читался subcr_chat_id из url.yml — при расхождении счётчик был всегда 0.
     group_id = GROUP_ID
-    required_members = _cfg_int("group_member_count", 3)
+    required_members = get_settings().group_member_count
 
     record = await db.get_user_add_count(group_id, user_id)
     added = int(record["add_user_count"] or 0) if record else 0
@@ -340,7 +335,7 @@ async def confirm_withdraw(call: types.CallbackQuery, state: FSMContext) -> None
 
     # Норму «добавил N участников» тоже перепроверяем: форма могла пролежать в FSM
     # до 7 дней, и за это время добавленные могли выйти из группы
-    required_members = _cfg_int("group_member_count", 3)
+    required_members = get_settings().group_member_count
     if required_members > 0:
         added_row = await db.get_user_add_count(GROUP_ID, user_id)
         added = int(added_row["add_user_count"] or 0) if added_row else 0
