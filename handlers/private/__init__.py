@@ -1,5 +1,5 @@
 from . import (
-    admin_panel,
+    admin,
     onboarding,
     faq,
     wallet,

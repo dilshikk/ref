@@ -35,9 +35,9 @@ def save_url_yaml() -> None:
     """
     Сохраняет настройки (url_yaml) атомарно в URL_YML_PATH.
 
-    Подставляется вместо admin_panel._save_yaml в handlers/__init__.py: старая версия
-    перезаписывала файл на месте (open("w")), и падение во время записи оставляло
-    пустой url.yml — бот больше не запускался, потому что config.py читает его при импорте.
+    Админ-панель (handlers/private/admin, #37) вызывает её напрямую. Раньше
+    admin_panel._save_yaml перезаписывал файл на месте (open("w")), и падение во время
+    записи оставляло пустой url.yml — бот не запускался, т.к. config.py читает его при импорте.
     """
     from data.config import URL_YML_PATH, url_yaml
 
