@@ -5,10 +5,11 @@ import asyncio
 import time
 from typing import Any, cast
 
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from loguru import logger
 
 from loader import db, bot
+from utils.subscription_status import Outcome, SubscriptionStatus, combine
 
 # Положительный результат держим дольше: подписанные не дёргают Telegram API
 # на каждое сообщение.
@@ -38,65 +39,78 @@ def _remember(cache: dict[int, float], user_id: int, now: float) -> None:
     cache[user_id] = now
 
 
-def _cached_result(user_id: int, now: float) -> bool | None:
+def _cached_result(user_id: int, now: float) -> SubscriptionStatus | None:
     positive_at = _subscribed_cache.get(user_id)
     if positive_at is not None and now - positive_at < _POSITIVE_CACHE_TTL_SECONDS:
-        return True
+        return SubscriptionStatus.SUBSCRIBED
     negative_at = _not_subscribed_cache.get(user_id)
     if negative_at is not None and now - negative_at < _NEGATIVE_CACHE_TTL_SECONDS:
-        return False
+        return SubscriptionStatus.NOT_SUBSCRIBED
     return None
 
 
-async def _check_channels(user_id: int, *, fail_closed: bool = False) -> bool:
+def _outcome(channel: dict[str, Any], result: object) -> Outcome:
+    if not isinstance(result, BaseException):
+        return "member" if _is_member_status(result) else "not_member"
+    if isinstance(result, (TelegramBadRequest, TelegramForbiddenError)):
+        # Канал настроен неверно (бот не админ / канал удалён)
+        logger.warning(f"Не удалось проверить подписку на {channel['chat_id']}: {result}")
+        return "config"
+    # Сеть, таймаут, 5xx Telegram: результат неизвестен
+    logger.error(f"Ошибка проверки подписки {channel['chat_id']}: {result!r}")
+    return "error"
+
+
+async def _check_channels(user_id: int, *, strict: bool = False) -> SubscriptionStatus:
     """
-    Каналы проверяются параллельно. fail_closed=False (доступ к боту): если канал
-    проверить нельзя, он пропускается, чтобы ошибка настройки не блокировала всех.
-    fail_closed=True (начисление денег, #18): любая ошибка = НЕ подписан.
+    Каналы проверяются параллельно (asyncio.gather). Сбой проверки больше не
+    засчитывается как подписка (#24): итог UNKNOWN. strict=True (начисление денег):
+    неверно настроенный канал тоже означает «не подписан».
     """
     channels = cast(list[dict[str, Any]], await db.get_all_channels() or [])
     if not channels:
-        return True
+        return SubscriptionStatus.SUBSCRIBED
     results = await asyncio.gather(
         *(bot.get_chat_member(chat_id=ch["chat_id"], user_id=user_id) for ch in channels),
         return_exceptions=True,
     )
-    for channel, result in zip(channels, results):
-        if isinstance(result, BaseException):
-            if isinstance(result, TelegramBadRequest):
-                # Канал настроен неверно (бот не админ / канал удалён)
-                logger.warning(f"Не удалось проверить подписку на {channel['chat_id']}: {result}")
-            else:
-                logger.error(f"Ошибка проверки подписки {channel['chat_id']}: {result}")
-            if fail_closed:
-                return False
-            continue
-        if not _is_member_status(result):
-            return False
-    return True
+    return combine((_outcome(ch, r) for ch, r in zip(channels, results)), strict=strict)
 
 
-async def is_user_subscribed(user_id: int, use_cache: bool = True) -> bool:
+async def get_subscription_status(user_id: int, use_cache: bool = True) -> SubscriptionStatus:
     now = time.monotonic()
     if use_cache:
         cached = _cached_result(user_id, now)
         if cached is not None:
             return cached
 
-    subscribed = await _check_channels(user_id)
-    if subscribed:
+    try:
+        status = await _check_channels(user_id)
+    except Exception as e:
+        # Например, недоступна БД со списком каналов
+        logger.error(f"Проверка подписки не удалась user={user_id}: {e!r}")
+        return SubscriptionStatus.UNKNOWN
+
+    if status is SubscriptionStatus.SUBSCRIBED:
         _not_subscribed_cache.pop(user_id, None)
         _remember(_subscribed_cache, user_id, now)
-    else:
+    elif status is SubscriptionStatus.NOT_SUBSCRIBED:
         _subscribed_cache.pop(user_id, None)
         _remember(_not_subscribed_cache, user_id, now)
-    return subscribed
+    # UNKNOWN не кэшируем: при следующем сообщении проверим снова
+    return status
+
+
+async def is_user_subscribed(user_id: int, use_cache: bool = True) -> bool:
+    """True только при подтверждённой подписке; сбой проверки = False."""
+    return await get_subscription_status(user_id, use_cache) is SubscriptionStatus.SUBSCRIBED
 
 
 async def is_user_subscribed_strict(user_id: int) -> bool:
     """Для начислений: без кэша, любая ошибка проверки = не подписан."""
     try:
-        return await _check_channels(user_id, fail_closed=True)
+        status = await _check_channels(user_id, strict=True)
     except Exception as e:
-        logger.warning(f"Строгая проверка подписки не удалась user={user_id}: {e}")
+        logger.warning(f"Строгая проверка подписки не удалась user={user_id}: {e!r}")
         return False
+    return status is SubscriptionStatus.SUBSCRIBED
