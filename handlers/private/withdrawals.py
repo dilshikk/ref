@@ -24,6 +24,11 @@ router = private_only(Router(name="private.withdrawals"))
 # ✅ WeakValueDictionary — неактивные локи удаляются автоматически
 user_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
 
+ALREADY_REQUESTED_TEXT = (
+    "⚠️ Вы уже подавали заявку на вывод сегодня.\n"
+    "Повторная заявка возможна через 24 часа."
+)
+
 
 def _mask_payment_info(value: str | None) -> str:
     """Карта/телефон для журналов: только последние 4 цифры."""
@@ -426,12 +431,11 @@ async def confirm_withdraw(call: types.CallbackQuery, state: FSMContext) -> None
     data = await state.get_data()
     user_id = call.from_user.id
 
+    # Быстрая проверка, чтобы не гонять расчёт баланса зря.
+    # Окончательная — в add_payout_request, в одном SQL со вставкой (#47)
     existing = await db.get_pending_or_today_payout(user_id)
     if existing:
-        await call.message.answer(
-            "⚠️ Вы уже подавали заявку на вывод сегодня.\n"
-            "Повторная заявка возможна через 24 часа."
-        )
+        await call.message.answer(ALREADY_REQUESTED_TEXT)
         await state.clear()
         return
 
@@ -474,28 +478,35 @@ async def confirm_withdraw(call: types.CallbackQuery, state: FSMContext) -> None
             await state.clear()
             return
 
-    await db.add_payout_request(
+    request_id = await db.add_payout_request(
         user_id=user_id,
         full_name=call.from_user.full_name,
         username=call.from_user.username or "—",
         card_number=payment_info,
         amount=balance,
     )
+    if request_id is None:
+        # Заявку успели создать параллельно (второй экземпляр бота, двойное нажатие) (#47)
+        logger.warning(f"Повторная заявка на вывод отклонена базой: user={user_id}")
+        await call.message.answer(ALREADY_REQUESTED_TEXT)
+        await state.clear()
+        return
+
     # В журнал действий — только последние 4 цифры реквизитов
     await audit_log_service.record_user_action(
         actor_id=user_id,
         action="withdrawal_requested",
         entity_type="payout_request",
-        entity_id=user_id,
+        entity_id=request_id,
         new_value={"amount": balance, "payment_info": _mask_payment_info(payment_info)},
-        payload={"withdraw_type": data.get("withdraw_type")},
+        payload={"withdraw_type": data.get("withdraw_type"), "user_id": user_id},
     )
     await activity_service.record(
         user_id=user_id,
         event="withdrawal_requested",
         chat_id=call.message.chat.id if call.message else None,
         session_id=call.id,
-        payload={"amount": balance},
+        payload={"amount": balance, "request_id": request_id},
     )
 
     await call.message.edit_text(
@@ -509,7 +520,7 @@ async def confirm_withdraw(call: types.CallbackQuery, state: FSMContext) -> None
         try:
             await call.bot.send_message(
                 admin,
-                f"📢 <b>Новая заявка на вывод</b>\n\n"
+                f"📢 <b>Новая заявка на вывод</b> #{request_id}\n\n"
                 f"👤 <a href='tg://user?id={user_id}'>{html.escape(call.from_user.full_name)}</a>\n"
                 f"🆔 ID: <code>{user_id}</code>\n"
                 f"💰 Сумма: <b>{balance}</b> сум\n"

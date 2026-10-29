@@ -11,6 +11,8 @@
   решения администратора (/holds).
 - _database_url: строка подключения собирается через URL.create (#21).
 - реквизиты выплат шифруются при записи и расшифровываются при чтении (#20).
+- add_payout_request: «одна заявка в ожидании» и «одна заявка в сутки» проверяются
+  в том же SQL, что и вставка, плюс уникальный индекс в БД (#47).
 """
 from __future__ import annotations
 
@@ -318,6 +320,43 @@ class ReferralDatabase(SafeDatabase):
         if total:
             logger.info(f"🔐 Зашифрованы реквизиты старых заявок: {total}")
 
+    # ======================================================
+    # Одна заявка в ожидании на пользователя (#47)
+    # ======================================================
+    async def ensure_unique_pending_payout(self) -> None:
+        """
+        Миграция: у пользователя может быть только одна заявка в статусе pending.
+        Уже существующие дубли (если были) отклоняются, кроме самой ранней, иначе
+        индекс не создастся. Отклонение ничего не списывает: деньги списываются
+        только при одобрении, так что баланс пользователя не меняется.
+        """
+        rejected = await self.execute(
+            """
+            WITH dup AS (
+                SELECT id FROM (
+                    SELECT id,
+                           ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY created_at, id) AS rn
+                    FROM PayoutRequests
+                    WHERE status = 'pending'
+                ) t
+                WHERE rn > 1
+            )
+            UPDATE PayoutRequests p SET status = 'rejected'
+            FROM dup
+            WHERE p.id = dup.id
+            RETURNING p.id, p.user_id
+            """,
+            fetchall=True,
+        )
+        if rejected:
+            ids = ", ".join(f"#{r['id']} (user {r['user_id']})" for r in rejected)
+            logger.warning(f"⚠️ Отклонены повторные заявки на вывод в ожидании: {ids}")
+        await self.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_payout_pending_user "
+            "ON PayoutRequests (user_id) WHERE status = 'pending'"
+        )
+        logger.info("✅ Одна заявка на вывод в ожидании на пользователя (uq_payout_pending_user).")
+
     async def add_payout_request(
         self,
         user_id: int,
@@ -325,14 +364,30 @@ class ReferralDatabase(SafeDatabase):
         username: str | None,
         card_number: str,
         amount: float,
-    ) -> None:
-        await super().add_payout_request(
-            user_id=user_id,
-            full_name=full_name,
-            username=username,
-            card_number=payment_details.encrypt(card_number),
-            amount=amount,
+    ) -> int | None:
+        """
+        Создаёт заявку и возвращает её ID или None, если у пользователя уже есть
+        заявка в ожидании или заявка за последние 24 часа.
+        Правило «раз в сутки» проверяется в том же запросе, что и вставка, а две
+        одновременные вставки (второй экземпляр бота, двойное нажатие) упираются
+        в уникальный индекс uq_payout_pending_user — ON CONFLICT DO NOTHING.
+        """
+        row = await self.execute(
+            """
+            INSERT INTO PayoutRequests (user_id, full_name, username, card_number, amount, status)
+            SELECT $1, $2, $3, $4, $5, 'pending'
+            WHERE NOT EXISTS (
+                SELECT 1 FROM PayoutRequests
+                WHERE user_id = $1
+                  AND (status = 'pending' OR created_at >= NOW() - INTERVAL '24 hours')
+            )
+            ON CONFLICT DO NOTHING
+            RETURNING id
+            """,
+            parameters=(user_id, full_name, username, payment_details.encrypt(card_number), amount),
+            fetchone=True,
         )
+        return int(row["id"]) if row else None
 
     async def get_pending_payouts(self):
         return _decrypt_rows(await super().get_pending_payouts())
