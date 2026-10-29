@@ -32,6 +32,8 @@ from filters.admin import IsBotAdminFilter
 from data.config import ADMINS, url_yaml, config_dir
 from services.activity import activity_service
 from services.audit_log import audit_log_service
+from services.payouts import payment_report_target
+from utils.payout_report import parse_payment_chat_id
 from utils.bot_commands import ADMIN_COMMANDS, USER_COMMANDS, format_commands, set_all_commands
 
 router = private_only(Router(name="private.admin_panel"))
@@ -140,76 +142,6 @@ async def _show_main_section(message: types.Message, text: str, keyboard: ReplyK
 
 async def _show_placeholder(message: types.Message, title: str, body: str, keyboard: ReplyKeyboardMarkup) -> None:
     await message.answer(f"<b>{title}</b>\n\n{body}", parse_mode="HTML", reply_markup=keyboard)
-
-
-def _resolve_payment_report_target() -> int | str | None:
-    raw = url_yaml.get("payment_chat_id")
-    if isinstance(raw, int):
-        return raw
-    if isinstance(raw, str):
-        value = raw.strip()
-        if value.startswith("-100") and value[1:].isdigit():
-            return int(value)
-        if value.startswith("@") and len(value) > 1:
-            return value
-
-    channel_raw = url_yaml.get("payment_channel")
-    if isinstance(channel_raw, str):
-        value = channel_raw.strip()
-        if value.startswith("-100") and value[1:].isdigit():
-            return int(value)
-        if value.startswith("@") and len(value) > 1:
-            return value
-    return None
-
-
-def _parse_payment_chat_id(value: str) -> int | str | None:
-    raw = value.strip()
-    if raw.startswith("-100") and raw[1:].isdigit():
-        return int(raw)
-    if raw.startswith("@") and len(raw) > 1 and " " not in raw:
-        return raw
-    return None
-
-
-async def _send_payout_report(
-    message: types.Message,
-    payout: dict[str, Any],
-    admin_id: int,
-    include_receipt: bool,
-) -> bool:
-    bot = message.bot
-    if bot is None:
-        return False
-
-    target = _resolve_payment_report_target()
-    if target is None:
-        return False
-
-    amount = payout.get("amount")
-    amount_text = str(amount) if amount is not None else "-"
-    card_raw = str(payout.get("card_number") or "")
-    card_masked = f"****{card_raw[-4:]}" if len(card_raw) >= 4 else "-"
-    user_id = payout.get("user_id") or "-"
-    full_name = str(payout.get("full_name") or "-")
-    req_id = payout.get("id") or "-"
-
-    report_text = (
-        "💸 <b>Отчет о выплате</b>\n\n"
-        f"🆔 Заявка: <code>{req_id}</code>\n"
-        f"👤 Пользователь: <a href='tg://user?id={user_id}'>{full_name}</a>\n"
-        f"🧾 User ID: <code>{user_id}</code>\n"
-        f"💰 Сумма: <b>{amount_text}</b>\n"
-        f"💳 Карта: <code>{card_masked}</code>\n"
-        f"👮 Подтвердил админ: <code>{admin_id}</code>\n"
-        f"🕒 Время: <b>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</b>\n"
-        f"📎 Чек: <b>{'приложен' if include_receipt else 'не приложен'}</b>"
-    )
-
-    await bot.send_message(target, report_text, parse_mode="HTML")
-    if include_receipt:
-        await message.copy_to(target)
-    return True
 
 
 async def _record_setting_change(actor_id: int, setting_name: str, old_value, new_value) -> None:
@@ -710,7 +642,7 @@ async def stats_menu(message: types.Message):
 @router.message(F.text == "💰 Финансы", IsBotAdminFilter(ADMINS))
 async def finance_menu(message: types.Message):
     payouts = await _get_finance_totals()
-    payment_target = _resolve_payment_report_target()
+    payment_target = payment_report_target()
     payment_target_text = str(payment_target) if payment_target is not None else "не задан"
     await message.answer(
         "💰 <b>Финансы</b>\n\n"
@@ -1991,7 +1923,7 @@ async def update_payment_chat_id(message: types.Message, state: FSMContext):
     if user is None:
         return
     text = (message.text or "").strip()
-    parsed = _parse_payment_chat_id(text)
+    parsed = parse_payment_chat_id(text)
     if parsed is None:
         await message.answer(
             "❌ Неверный формат!\n"
