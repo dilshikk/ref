@@ -55,7 +55,6 @@ def setup_routers() -> Router:
         profile_settings.router,
         support.router,
         member_events.router,
-        onboarding.group_router,
         fallback.router,
     )
     return router
