@@ -4,7 +4,7 @@ from aiogram import Router
 def setup_routers() -> Router:
     from .groups import member_events
     from .private import (
-        admin_panel,
+        admin,
         broadcasts,
         payout_guard,
         referral_holds,
@@ -21,11 +21,6 @@ def setup_routers() -> Router:
         fallback,
     )
     from .errors import error_router
-    from utils.yaml_io import save_url_yaml
-
-    # Все обработчики админки вызывают _save_yaml() через глобальное имя модуля,
-    # поэтому подмена здесь переключает их на атомарную запись в URL_YML_PATH.
-    admin_panel._save_yaml = save_url_yaml
 
     router = Router(name="handlers.root")
 
@@ -39,10 +34,11 @@ def setup_routers() -> Router:
         # стоит первым, чтобы money_guard отвечал раньше остальных роутеров
         payout_guard.router,
         referral_holds.router,
-        # broadcasts тоже ПЕРЕД admin_panel: заменяет старые обработчики рассылок (#19)
+        # broadcasts тоже ПЕРЕД админкой: заменяет старые обработчики рассылок (#19)
         broadcasts.router,
         broadcasts.member_router,
-        admin_panel.router,
+        # админ-панель по разделам (#37); формы внутри пакета подключены последними
+        admin.router,
         onboarding.private_router,
         faq.router,
         subscriptions.router,
