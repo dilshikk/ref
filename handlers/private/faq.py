@@ -1,4 +1,3 @@
-# /www/wwwroot/uz_ibot/handlers/private/faq.py
 from aiogram import Router, types
 from aiogram.filters import Command
 
