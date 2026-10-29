@@ -10,9 +10,11 @@ from loguru import logger
 
 from data.config import ADMINS
 from keyboards.inline_keyboards.actions import subscribe_keyboard
-from services.subscription import is_user_subscribed
+from services.subscription import get_subscription_status
+from utils.subscription_status import SubscriptionStatus
 
 _SUBSCRIBE_TEXT = "Чтобы пользоваться ботом, подпишитесь на все каналы 👇"
+_UNKNOWN_TEXT = "⚠️ Не удалось проверить подписку. Попробуйте ещё раз через минуту."
 # Кнопки каналов присылаем не чаще раза в 30 секунд: раньше каждое сообщение
 # неподписанного пользователя порождало новое сообщение с кнопками.
 _PROMPT_COOLDOWN_SECONDS = 30.0
@@ -57,14 +59,19 @@ class SubscriptionMiddleware(BaseMiddleware):
         if chat is None or chat.type != "private":
             return await handler(event, data)
 
-        try:
-            subscribed = await is_user_subscribed(user.id)
-        except Exception as e:
-            logger.warning(f"Проверка подписки не удалась user={user.id}: {e}")
-            subscribed = True
-        if subscribed:
+        # Сбой проверки больше не считается подпиской (#24): просим повторить позже
+        status = await get_subscription_status(user.id)
+        if status is SubscriptionStatus.SUBSCRIBED:
             _last_prompt_at.pop(user.id, None)
             return await handler(event, data)
+
+        if status is SubscriptionStatus.UNKNOWN:
+            logger.warning(f"Подписка user={user.id} не проверена, доступ временно закрыт")
+            if isinstance(event, CallbackQuery):
+                await event.answer(_UNKNOWN_TEXT, show_alert=True)
+            elif isinstance(event, Message) and _should_prompt(user.id):
+                await event.answer(_UNKNOWN_TEXT)
+            return None
 
         if isinstance(event, CallbackQuery):
             # Всплывающее окно не засоряет чат — показываем всегда
