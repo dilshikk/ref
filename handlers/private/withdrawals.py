@@ -1,4 +1,4 @@
-# /www/wwwroot/uz_ibot/handlers/private/withdrawals.py
+# handlers/private/withdrawals.py
 import asyncio
 import html
 import time
@@ -15,8 +15,9 @@ from loader import db
 from states.flows import WithdrawalFlow
 from services.activity import activity_service
 from services.audit_log import audit_log_service
-from services.group_adds import qualification_enabled, qualify_pending
+from services.group_adds import locked_explanation, qualification_enabled, qualify_pending, unverified_referral_sum
 from utils import captcha, payment_details
+from utils.payout_math import withdrawable
 
 router = private_only(Router(name="private.withdrawals"))
 
@@ -46,6 +47,29 @@ async def _captcha_lock_seconds(user_id: int) -> int:
         return 60
 
 
+async def _withdrawable_now(user_id: int) -> tuple[int, int, int]:
+    """
+    (баланс, на проверке, можно вывести) (#46).
+    Перед расчётом проверяем добавленных: прошедшие проверку сразу открывают деньги.
+    """
+    try:
+        await qualify_pending(GROUP_ID, user_id)
+    except Exception as e:
+        logger.error(f"Ошибка проверки добавленных inviter={user_id}: {e}")
+    record = await db.get_user_invited_count(user_id)
+    # Баланс хранится в деньгах: смена цены за реферала его не пересчитывает
+    balance = int(record["balance_sum"] or 0) if record else 0
+    locked = await unverified_referral_sum(user_id)
+    return balance, locked, withdrawable(balance, locked, 0)
+
+
+def _locked_note(locked: int) -> str:
+    if locked <= 0:
+        return ""
+    explanation = locked_explanation()
+    return f"\n🔒 На проверке: <b>{locked}</b> сум." + (f"\n<i>{explanation}</i>" if explanation else "")
+
+
 # ======================================================
 # 1. Вывести средства → проверка баланса
 # ======================================================
@@ -72,23 +96,22 @@ async def _do_withdraw(user_id: int, reply_target: types.Message, state: FSMCont
                 await reply_target.answer(_lock_text(locked_for), parse_mode="HTML")
                 return
 
-            record = await db.get_user_invited_count(user_id)
+            if await db.is_user_blocked(user_id):
+                await reply_target.answer("⛔ Ваш аккаунт заблокирован. Вывод недоступен.")
+                return
 
             # get_settings(): строка "5000" или мусор в url.yml не роняют сравнение (#22)
             settings = get_settings()
             min_balance = settings.min_balance
             max_withdraw = settings.max_withdraw
-            # Баланс хранится в деньгах: смена цены за реферала его не пересчитывает
-            balance = int(record["balance_sum"] or 0) if record else 0
-
-            if await db.is_user_blocked(user_id):
-                await reply_target.answer("⛔ Ваш аккаунт заблокирован. Вывод недоступен.")
-                return
+            # Деньги за непроверенных приглашённых не выводятся (#46)
+            _, locked, balance = await _withdrawable_now(user_id)
+            locked_note = _locked_note(locked)
 
             if balance <= 0:
                 await reply_target.answer(
                     "😕 <b>У вас пока нет доступных средств.</b>\n\n"
-                    "💸 Приглашайте друзей и зарабатывайте.",
+                    "💸 Приглашайте друзей и зарабатывайте." + locked_note,
                     parse_mode="HTML",
                 )
                 return
@@ -96,9 +119,9 @@ async def _do_withdraw(user_id: int, reply_target: types.Message, state: FSMCont
             if balance < min_balance:
                 await reply_target.answer(
                     f"⚠️ Недостаточно средств для вывода.\n\n"
-                    f"💵 Баланс: <b>{balance}</b> сум\n"
+                    f"💵 Доступно: <b>{balance}</b> сум\n"
                     f"📈 Минимум: <b>{min_balance}</b> сум\n"
-                    f"➕ Не хватает: <b>{min_balance - balance}</b> сум",
+                    f"➕ Не хватает: <b>{min_balance - balance}</b> сум" + locked_note,
                     parse_mode="HTML",
                 )
                 return
@@ -112,7 +135,7 @@ async def _do_withdraw(user_id: int, reply_target: types.Message, state: FSMCont
             if balance > max_withdraw:
                 await reply_target.answer(
                     f"⚠️ Максимальный лимит вывода — <b>{max_withdraw}</b> сум.\n"
-                    f"📈 Ваш баланс: <b>{balance}</b> сум.",
+                    f"📈 Доступно: <b>{balance}</b> сум.",
                     parse_mode="HTML",
                 )
 
@@ -121,7 +144,7 @@ async def _do_withdraw(user_id: int, reply_target: types.Message, state: FSMCont
             ]])
             await state.update_data(balance=withdraw_amount)
             await reply_target.answer(
-                f"💰 Сумма к выводу: <b>{withdraw_amount}</b> сум\n"
+                f"💰 Сумма к выводу: <b>{withdraw_amount}</b> сум{locked_note}\n"
                 "Нажмите <b>Продолжить</b>, чтобы перейти к оформлению. 👇",
                 reply_markup=markup,
                 parse_mode="HTML",
@@ -426,12 +449,11 @@ async def confirm_withdraw(call: types.CallbackQuery, state: FSMContext) -> None
         await state.clear()
         return
 
-    # Перепроверяем актуальный баланс: он мог измениться с начала оформления
-    record = await db.get_user_invited_count(user_id)
-    current_balance = int(record["balance_sum"] or 0) if record else 0
-    if balance > current_balance:
+    # Перепроверяем доступную сумму: баланс и деньги «на проверке» могли измениться (#46)
+    _, _, current_available = await _withdrawable_now(user_id)
+    if balance > current_available:
         await call.message.answer(
-            f"⚠️ Баланс изменился (сейчас <b>{current_balance}</b> сум). Начните вывод заново.",
+            f"⚠️ Доступная сумма изменилась (сейчас <b>{current_available}</b> сум). Начните вывод заново.",
             parse_mode="HTML",
         )
         await state.clear()
