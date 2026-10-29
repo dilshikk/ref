@@ -1,5 +1,7 @@
 # Проверка кода и тесты на каждый push и pull request (#24)
 # + аудит зависимостей на уязвимости (#43)
+# + поиск секретов во всей истории git (#41, #42)
+# + SQL-тесты денежной логики на настоящем PostgreSQL 16 (#48)
 name: CI
 
 on:
@@ -23,6 +25,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: referral_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - uses: actions/checkout@v7
 
@@ -41,6 +58,14 @@ jobs:
         run: ruff check . --output-format=github
 
       - name: pytest
+        env:
+          # Включает tests/test_sql_money.py (#48). База одноразовая, только для CI
+          TEST_DATABASE: "1"
+          DB_HOST: localhost
+          DB_PORT: "5432"
+          DB_USER: postgres
+          DB_PASS: postgres
+          DB_NAME: referral_test
         run: python -m pytest tests -q
 
   audit:
@@ -59,3 +84,20 @@ jobs:
 
       - name: Аудит зависимостей
         run: pip-audit -r requirements.txt --strict --progress-spinner off
+
+  secrets:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # нужна вся история, а не только последний коммит
+
+      - name: Поиск секретов в истории
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: false
+          
