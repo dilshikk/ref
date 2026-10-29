@@ -11,9 +11,9 @@
 - кнопки «одобрить/отклонить» убираются только после окончательного решения:
   если админ нажал «одобрить» и не прислал чек, заявку можно добить или отклонить позже;
 - шаг с чеком можно отменить, админ больше не «застревает» в нём;
-- выплата не одобряется, если баланс пользователя стал меньше суммы заявки или
-  число добавленных участников стало меньше нормы (например, приглашённые вышли
-  из группы). Проверка идёт в том же SQL, что и списание, — атомарно.
+- выплата не одобряется, если баланс пользователя за вычетом денег «на проверке»
+  (#46) стал меньше суммы заявки или число добавленных участников стало меньше
+  нормы. Проверка идёт в том же SQL, что и списание, — атомарно.
 - одобрять/отклонять выплаты может только MONEY_ADMINS (#23); остальным админам
   отвечает money_guard.
 - отчёт о выплате отправляется через services/payouts.py, а не через
@@ -35,10 +35,11 @@ from filters import private_only
 from filters.admin import IsAdminWithoutMoneyRights, IsBotAdminFilter, IsMoneyAdmin
 from keyboards.reply_keyboards import finance_kb
 from loader import db
+from services.group_adds import qualification_enabled
 from services.payouts import send_payout_report
 from states.flows import AdminFlow
 from utils import payment_details
-from utils.payout_math import credits_for_amount
+from utils.payout_math import approval_rejection_reasons, credits_for_amount
 
 router = private_only(Router(name="private.payout_guard"))
 
@@ -245,9 +246,12 @@ async def payout_finalize_with_receipt(message: types.Message, state: FSMContext
     amount = int(payout_row.get("amount") or 0)
     credits_to_deduct = credits_for_amount(amount, settings.invited_credit)
     required_members = settings.group_member_count
+    hold_hours = settings.referral_hold_hours
+    check_quality = qualification_enabled()
 
-    # Баланс и норма «добавил N участников» проверяются внутри того же SQL, что и
-    # списание: между проверкой и списанием никто не успеет выйти из группы.
+    # Баланс, деньги «на проверке» (#46) и норма «добавил N участников» проверяются
+    # внутри того же SQL, что и списание: между проверкой и списанием никто не
+    # успеет выйти из группы.
     approved = cast(
         dict[str, Any] | None,
         await db.approve_payout_if_pending(
@@ -255,27 +259,29 @@ async def payout_finalize_with_receipt(message: types.Message, state: FSMContext
             credits_to_deduct,
             group_id=GROUP_ID,
             members_to_deduct=required_members,
+            hold_hours=hold_hours,
+            check_quality=check_quality,
         ),
     )
     if not approved:
         await state.clear()
-        info = cast(dict[str, Any] | None, await db.get_payout_approval_state(req_id, GROUP_ID))
+        info = cast(
+            dict[str, Any] | None,
+            await db.get_payout_approval_state(
+                req_id, GROUP_ID, hold_hours=hold_hours, check_quality=check_quality
+            ),
+        )
         if not info or info.get("status") != "pending":
             await _remove_buttons_by_id(message, msg_chat_id, msg_id)
             await message.answer("⚠️ Заявка уже обработана (одобрена или отклонена).", reply_markup=finance_kb())
             return
-        balance = int(info.get("balance_sum") or 0)
-        added = int(info.get("add_user_count") or 0)
-        reasons: list[str] = []
-        if balance < amount:
-            reasons.append(
-                f"• баланс пользователя сейчас {balance} сум при сумме заявки {amount} сум "
-                "(часть приглашённых, скорее всего, вышла из группы)"
-            )
-        if required_members > 0 and added < required_members:
-            reasons.append(f"• добавлено участников: {added} из {required_members} (кто-то вышел из группы)")
-        if not reasons:
-            reasons.append("• условия изменились во время подтверждения, повторите попытку")
+        reasons = approval_rejection_reasons(
+            balance=int(info.get("balance_sum") or 0),
+            locked=int(info.get("locked_sum") or 0),
+            added=int(info.get("add_user_count") or 0),
+            amount=amount,
+            required_members=required_members,
+        )
         # Кнопки под заявкой оставляем: админ может отклонить её
         await message.answer(
             f"⛔ Выплата #{req_id} не подтверждена:\n" + "\n".join(reasons) + "\n\n"

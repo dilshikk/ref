@@ -119,6 +119,8 @@ async def database_connected() -> None:
     await db.ensure_payout_card_holder_column()
     # Рассылки: прогресс по получателям и пометка заблокировавших бота (#19)
     await db.ensure_broadcast_progress_columns()
+    # Деньги за отклонённых проверкой больше не висят «на проверке» навсегда (#46)
+    await db.release_rejected_referral_money()
 
     logger.info("✅ Все таблицы проверены и готовы.")
 
