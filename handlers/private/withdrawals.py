@@ -1,7 +1,7 @@
 # /www/wwwroot/uz_ibot/handlers/private/withdrawals.py
 import asyncio
 import html
-import random
+import time
 from weakref import WeakValueDictionary
 
 from aiogram import Router, types, F
@@ -15,7 +15,8 @@ from loader import db
 from states.flows import WithdrawalFlow
 from services.activity import activity_service
 from services.audit_log import audit_log_service
-from utils import payment_details
+from services.group_adds import qualification_enabled, qualify_pending
+from utils import captcha, payment_details
 
 router = private_only(Router(name="private.withdrawals"))
 
@@ -26,6 +27,23 @@ user_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
 def _mask_payment_info(value: str | None) -> str:
     """Карта/телефон для журналов: только последние 4 цифры."""
     return payment_details.mask(value)
+
+
+def _lock_text(seconds: int) -> str:
+    minutes = max(1, (seconds + 59) // 60)
+    return (
+        "⛔ Слишком много неверных ответов на проверку.\n"
+        f"Вывод временно недоступен, попробуйте через <b>{minutes}</b> мин."
+    )
+
+
+async def _captcha_lock_seconds(user_id: int) -> int:
+    try:
+        return await db.get_captcha_lock_seconds(user_id)
+    except Exception as e:
+        # Не удалось проверить — не пускаем к выводу, а не наоборот
+        logger.error(f"Не удалось проверить блокировку капчи user={user_id}: {e}")
+        return 60
 
 
 # ======================================================
@@ -48,6 +66,12 @@ async def _do_withdraw(user_id: int, reply_target: types.Message, state: FSMCont
 
     async with lock:
         try:
+            # Блокировка после неверных ответов капчи хранится в БД: /start её не сбрасывает (#18)
+            locked_for = await _captcha_lock_seconds(user_id)
+            if locked_for > 0:
+                await reply_target.answer(_lock_text(locked_for), parse_mode="HTML")
+                return
+
             record = await db.get_user_invited_count(user_id)
 
             # get_settings(): строка "5000" или мусор в url.yml не роняют сравнение (#22)
@@ -125,28 +149,86 @@ async def start_withdraw_callback(call: types.CallbackQuery, state: FSMContext) 
 
 
 # ======================================================
-# 2. Капча
+# 2. Капча (#18)
 # ======================================================
-@router.callback_query(F.data == "withdraw_continue")
-async def ask_captcha(call: types.CallbackQuery, state: FSMContext) -> None:
-    await call.answer()
-    await call.message.delete()
-    a, b = random.randint(1, 9), random.randint(1, 9)
-    await state.update_data(captcha=a + b)
-    await call.message.answer(
-        f"🧩 Для безопасности ответьте: <b>{a} + {b}</b> = ?",
+async def _send_captcha(target: types.Message, state: FSMContext, prefix: str = "") -> None:
+    """Новый пример: после каждой ошибки ответ меняется, перебор не работает."""
+    c = captcha.generate()
+    await state.update_data(captcha=c.answer, captcha_issued_at=time.time())
+    await target.answer(
+        f"{prefix}🧩 Для безопасности решите пример и отправьте ответ числом:\n\n"
+        f"<b>{c.question} = ?</b>",
         parse_mode="HTML",
     )
     await state.set_state(WithdrawalFlow.CAPTCHA)
 
 
+@router.callback_query(F.data == "withdraw_continue")
+async def ask_captcha(call: types.CallbackQuery, state: FSMContext) -> None:
+    await call.answer()
+    try:
+        await call.message.delete()
+    except Exception as e:
+        logger.debug(f"Не удалось удалить сообщение: {e}")
+    locked_for = await _captcha_lock_seconds(call.from_user.id)
+    if locked_for > 0:
+        await state.clear()
+        await call.message.answer(_lock_text(locked_for), parse_mode="HTML")
+        return
+    await _send_captcha(call.message, state)
+
+
 @router.message(WithdrawalFlow.CAPTCHA)
 async def check_captcha(message: types.Message, state: FSMContext) -> None:
+    user_id = message.from_user.id
     data = await state.get_data()
-    text = (message.text or "").strip()
-    if not text.isdigit() or int(text) != data.get("captcha"):
-        await message.reply("❌ Неверно! Попробуйте ещё раз.")
+
+    answer = captcha.parse_answer(message.text)
+    if answer is None:
+        # Не число — попытку не засчитываем
+        await message.reply("✍️ Отправьте ответ числом, например: 42")
         return
+
+    if captcha.is_expired(data.get("captcha_issued_at"), time.time()):
+        await _send_captcha(message, state, prefix="⌛ Время на ответ вышло. Вот новый пример.\n\n")
+        return
+
+    if answer != data.get("captcha"):
+        try:
+            attempts, locked_for = await db.register_captcha_failure(
+                user_id,
+                max_attempts=captcha.MAX_ATTEMPTS,
+                lock_seconds=captcha.LOCK_SECONDS,
+                window_seconds=captcha.FAIL_WINDOW_SECONDS,
+            )
+        except Exception as e:
+            logger.error(f"Не удалось записать ошибку капчи user={user_id}: {e}")
+            await state.clear()
+            await message.answer("⚠️ Не удалось проверить ответ. Начните вывод заново чуть позже.")
+            return
+
+        if locked_for > 0:
+            await state.clear()
+            await audit_log_service.record_user_action(
+                actor_id=user_id,
+                action="withdraw_captcha_locked",
+                entity_type="user",
+                entity_id=user_id,
+                payload={"attempts": attempts, "lock_seconds": locked_for},
+            )
+            logger.warning(f"🚨 Капча: user={user_id} заблокирован на {locked_for} сек после {attempts} ошибок")
+            await message.answer(_lock_text(locked_for), parse_mode="HTML")
+            return
+
+        left = captcha.MAX_ATTEMPTS - attempts
+        await _send_captcha(message, state, prefix=f"❌ Неверно. Осталось попыток: <b>{left}</b>.\n\n")
+        return
+
+    try:
+        await db.reset_captcha_failures(user_id)
+    except Exception as e:
+        logger.warning(f"Не удалось сбросить ошибки капчи user={user_id}: {e}")
+    await state.update_data(captcha=None, captcha_issued_at=None)
 
     settings = get_settings()
     required_members = settings.group_member_count
@@ -160,9 +242,16 @@ async def check_captcha(message: types.Message, state: FSMContext) -> None:
         logger.warning("url.yml: subcr_channel не задан или не ссылка — кнопка группы скрыта")
     rows.append([types.InlineKeyboardButton(text="✅ Я добавил(а)", callback_data="check_group_members")])
 
+    note = ""
+    if qualification_enabled():
+        note = (
+            f"\n\nℹ️ Участник засчитывается, когда пробудет в группе не меньше "
+            f"<b>{settings.add_min_hours}</b> ч. и проявит активность "
+            "(напишет в группу или запустит бота)."
+        )
     await message.answer(
         f"📢 Добавьте <b>{required_members}</b> участников в группу, "
-        "затем нажмите «✅ Я добавил(а)».",
+        f"затем нажмите «✅ Я добавил(а)».{note}",
         parse_mode="HTML",
         reply_markup=types.InlineKeyboardMarkup(inline_keyboard=rows),
     )
@@ -179,15 +268,30 @@ async def check_group_members(call: types.CallbackQuery, state: FSMContext) -> N
     # Та же группа, в которой бот считает добавленных (GROUP_ID из .env).
     # Раньше здесь читался subcr_chat_id из url.yml — при расхождении счётчик был всегда 0.
     group_id = GROUP_ID
-    required_members = get_settings().group_member_count
+    settings = get_settings()
+    required_members = settings.group_member_count
+
+    # Сначала засчитываем добавленных, прошедших проверку (#18)
+    waiting = 0
+    try:
+        report = await qualify_pending(group_id, user_id)
+        waiting = report.waiting
+    except Exception as e:
+        logger.error(f"Ошибка проверки добавленных inviter={user_id}: {e}")
 
     record = await db.get_user_add_count(group_id, user_id)
     added = int(record["add_user_count"] or 0) if record else 0
 
     if added < required_members:
+        waiting_note = (
+            f"\n⏳ Ещё <b>{waiting}</b> на проверке: они будут засчитаны, когда пробудут в группе "
+            f"{settings.add_min_hours} ч. и проявят активность."
+            if waiting
+            else ""
+        )
         await call.message.answer(
-            f"❌ Добавлено: <b>{added}</b> из <b>{required_members}</b>.\n"
-            f"Нужно ещё <b>{required_members - added}</b> человек(а).\n\n"
+            f"❌ Засчитано: <b>{added}</b> из <b>{required_members}</b>.\n"
+            f"Нужно ещё <b>{required_members - added}</b> человек(а).{waiting_note}\n\n"
             "ℹ️ После каждой выплаты счёт начинается заново.",
             parse_mode="HTML",
         )
