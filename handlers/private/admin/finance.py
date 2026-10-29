@@ -5,6 +5,7 @@
 Тарифы меняются только в инлайн-панели «💰 Тарифы» (#99). Старые обработчики
 «💸 Мин. сумма вывода», «💰 Макс. сумма вывода», «🎁 Сумма за приглашение»,
 «🗳 Сумма за голос» удалены: их кнопки (tariffs_kb) нигде не показывались."""
+import html
 from typing import Any, cast
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
@@ -14,11 +15,11 @@ from keyboards.reply_keyboards import (
     finance_kb,
     settings_kb,
 )
-from keyboards.inline_keyboards.actions import action_keyboard
+from loader import db
 from states.flows import AdminFlow
 from filters.admin import IsBotAdminFilter
 from data.config import ADMINS, url_yaml
-from data.settings import get_settings
+from data.settings import get_settings, is_http_url
 from services.payouts import payment_report_target
 from utils.payout_report import parse_payment_chat_id
 from utils.yaml_io import save_url_yaml
@@ -87,17 +88,26 @@ async def _render_tariffs_panel(message: types.Message) -> None:
     )
 
 
+async def _holds_summary() -> tuple[int, int]:
+    """(вступлений на удержании, пользователей с удержаниями) — для шапки раздела (#101)."""
+    rows = cast(list[dict[str, Any]], await db.list_pending_referral_holds() or [])
+    return sum(int(row.get("held") or 0) for row in rows), len(rows)
+
+
 @router.message(F.text == "💰 Финансы", IsBotAdminFilter(ADMINS))
 async def finance_menu(message: types.Message):
     totals = await get_finance_totals()
+    held, held_users = await _holds_summary()
     payment_target = payment_report_target()
     payment_target_text = str(payment_target) if payment_target is not None else "не задан"
     await message.answer(
         "💰 <b>Финансы</b>\n\n"
         f"💸 Ожидают выплат: <b>{totals['pending_payouts']}</b> на <b>{totals['pending_sum']}</b> сум\n"
+        # #101: админ сразу видит, что есть отложенные начисления
+        f"⏸ На удержании: <b>{held}</b> вступлений у <b>{held_users}</b> пользователей\n"
         # #84: раньше здесь было число приглашённых под видом «единиц баланса»
         f"💵 На балансах пользователей: <b>{totals['balance_sum']}</b> сум\n"
-        f"🆔 Чат отчётов выплат: <code>{payment_target_text}</code>\n\n"
+        f"🆔 Чат отчётов выплат: <code>{html.escape(payment_target_text)}</code>\n\n"
         "Здесь собраны денежные настройки и отчёты.",
         parse_mode="HTML",
         reply_markup=finance_kb(),
@@ -207,17 +217,33 @@ async def tariff_inline_value_input(message: types.Message, state: FSMContext):
     await state.clear()
 
 
+# ─────────────────────────────────────────────
+# 🆔 Чат выплат: чат отчётов (payment_chat_id) и публичная ссылка (payment_channel, #107)
+# ─────────────────────────────────────────────
+def _payment_chat_text() -> str:
+    chat_id = str(url_yaml.get("payment_chat_id", "не задан"))
+    link = get_settings().payment_channel or "не задана"
+    return (
+        "🆔 <b>Чат выплат</b>\n\n"
+        f"🤖 Чат для отчётов о выплатах (сюда пишет бот):\n<code>{html.escape(chat_id)}</code>\n\n"
+        "👥 Публичная ссылка для пользователей (кнопка «📢 Чат выплат»):\n"
+        f"{html.escape(link)}\n\n"
+        "Что изменить?"
+    )
+
+
+def _payment_chat_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🤖 Чат отчётов", callback_data="yes_payment_chat_id")],
+        [InlineKeyboardButton(text="👥 Ссылка для пользователей", callback_data="payment_channel_edit")],
+        # «no» обрабатывает admin/menu.py::cancel_edit
+        [InlineKeyboardButton(text="❌ Ничего", callback_data="no")],
+    ])
+
+
 @router.message(F.text == "🆔 Чат выплат", IsBotAdminFilter(ADMINS))
 async def edit_payment_chat_id(message: types.Message):
-    value = url_yaml.get("payment_chat_id", "не задан")
-    await message.answer(
-        "🆔 Текущий payment_chat_id (для отчётов о выплатах):\n"
-        f"<code>{value}</code>\n\n"
-        "Поддерживается: <code>@channel_username</code> или <code>-1001234567890</code>.\n"
-        "Хотите изменить?",
-        parse_mode="HTML",
-        reply_markup=action_keyboard("payment_chat_id"),
-    )
+    await message.answer(_payment_chat_text(), parse_mode="HTML", reply_markup=_payment_chat_kb())
 
 
 @router.callback_query(F.data == "yes_payment_chat_id", IsBotAdminFilter(ADMINS))
@@ -225,9 +251,10 @@ async def confirm_payment_chat_id(call: types.CallbackQuery, state: FSMContext):
     msg = call.message
     if msg is None:
         return
+    await call.answer()
     await cast(Any, msg).answer(
         "Введите новый payment_chat_id.\n"
-        f"Сейчас: {url_yaml.get('payment_chat_id', 'не задан')}\n"
+        f"Сейчас: {html.escape(str(url_yaml.get('payment_chat_id', 'не задан')))}\n"
         "Примеры: <code>@my_channel</code> или <code>-1001234567890</code>",
         parse_mode="HTML",
         reply_markup=cancel_kb,
@@ -256,8 +283,48 @@ async def update_payment_chat_id(message: types.Message, state: FSMContext):
     save_url_yaml()
     await record_setting_change(user.id, "payment_chat_id", old_value, url_yaml["payment_chat_id"])
     await message.answer(
-        f"✅ payment_chat_id обновлён: <code>{url_yaml['payment_chat_id']}</code>",
+        f"✅ payment_chat_id обновлён: <code>{html.escape(str(url_yaml['payment_chat_id']))}</code>",
         parse_mode="HTML",
         reply_markup=finance_kb(),
     )
+    await state.clear()
+
+
+@router.callback_query(F.data == "payment_channel_edit", IsBotAdminFilter(ADMINS))
+async def confirm_payment_channel(call: types.CallbackQuery, state: FSMContext):
+    msg = call.message
+    if msg is None:
+        return
+    await call.answer()
+    await cast(Any, msg).answer(
+        "Введите публичную ссылку на чат/канал выплат — её увидят пользователи по кнопке «📢 Чат выплат».\n"
+        "Пример: <code>https://t.me/my_payouts</code>\n\n"
+        "Отправьте <code>-</code>, чтобы убрать ссылку.",
+        parse_mode="HTML",
+        reply_markup=cancel_kb,
+    )
+    await state.set_state(AdminFlow.set_payment_channel)
+
+
+@forms_router.message(AdminFlow.set_payment_channel, IsBotAdminFilter(ADMINS))
+async def update_payment_channel(message: types.Message, state: FSMContext):
+    user = message.from_user
+    if user is None:
+        return
+    text = (message.text or "").strip()
+    if text != "-" and not is_http_url(text):
+        await message.answer(
+            "❌ Нужна ссылка, начинающаяся с https://\nПример: <code>https://t.me/my_payouts</code>",
+            parse_mode="HTML",
+            reply_markup=cancel_kb,
+        )
+        return
+
+    new_value = "" if text == "-" else text
+    old_value = url_yaml.get("payment_channel", "")
+    url_yaml["payment_channel"] = new_value
+    save_url_yaml()
+    await record_setting_change(user.id, "payment_channel", old_value, new_value)
+    result = f"✅ Ссылка обновлена: {html.escape(new_value)}" if new_value else "✅ Ссылка убрана."
+    await message.answer(result, parse_mode="HTML", reply_markup=finance_kb())
     await state.clear()

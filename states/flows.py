@@ -23,6 +23,8 @@ class AdminFlow(StatesGroup):
     set_poll_config = State()
     payout_receipt_input = State()
     set_tariff_inline_value = State()
+    set_referral_value = State()   # #85: инлайн-панель «🎁 Реферальные настройки»
+    set_payment_channel = State()  # #107: публичная ссылка «📢 Чат выплат»
 
 
 class ReferralFlow(StatesGroup):
