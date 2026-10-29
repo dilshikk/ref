@@ -1,17 +1,43 @@
+"""📞 Поддержка: обращение пользователя к админам и ответ админа.
+
+#102: режим обращения раньше никогда не снимался — после отправки бот снова
+ставил SupportFlow.waiting_message, и кнопки меню (например «🗳 Голосование»)
+и любой текст уходили админам. Теперь:
+- после отправки обращения состояние сбрасывается;
+- на шаге ввода есть inline-кнопка «❌ Отмена»;
+- кнопка меню или команда во время ввода закрывают режим и обрабатываются
+  как обычно (SkipHandler передаёт сообщение дальше по роутерам).
+"""
 import html
 
 from aiogram import Router, types, F
+from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.fsm.context import FSMContext
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup
 from loguru import logger
 
 from filters import private_only
 from filters.admin import IsBotAdminFilter
 from data.config import ADMINS
 from data.settings import get_settings
+from keyboards.reply_keyboards import menu_kb, reply_keyboard_for_admin
 from states.flows import SupportFlow, AdminFlow
 
 router = private_only(Router(name="private.support"))
+
+_CANCEL_CALLBACK = "support_cancel"
+
+_cancel_kb = InlineKeyboardMarkup(
+    inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=_CANCEL_CALLBACK)]]
+)
+
+
+def _keyboard_texts(*keyboards: ReplyKeyboardMarkup) -> frozenset[str]:
+    return frozenset(button.text for kb in keyboards for row in kb.keyboard for button in row)
+
+
+# Тексты кнопок меню: такое сообщение — не обращение, а нажатие кнопки
+_MENU_TEXTS = _keyboard_texts(menu_kb(), reply_keyboard_for_admin()) | {"⬅ Назад", "⬅️ Назад", "🔙 Назад"}
 
 
 def _support_preview(message: types.Message) -> str:
@@ -44,8 +70,29 @@ async def support(message: types.Message, state: FSMContext) -> None:
         "Сообщение будет отправлено администраторам, и ответ придет сюда в чат с ботом."
         f"{extra}",
         parse_mode="HTML",
+        reply_markup=_cancel_kb,
     )
     await state.set_state(SupportFlow.waiting_message)
+
+
+@router.callback_query(F.data == _CANCEL_CALLBACK)
+async def support_cancel(call: types.CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() == SupportFlow.waiting_message.state:
+        await state.clear()
+    if call.message is not None and isinstance(call.message, types.Message):
+        try:
+            await call.message.edit_reply_markup(reply_markup=None)
+        except Exception as e:
+            logger.debug(f"support: не удалось убрать кнопку отмены: {e}")
+        await call.message.answer("❌ Обращение отменено.")
+    await call.answer()
+
+
+@router.message(SupportFlow.waiting_message, F.text.func(lambda t: t in _MENU_TEXTS or t.startswith("/")))
+async def support_exit_on_menu(message: types.Message, state: FSMContext) -> None:
+    """Кнопка меню или команда — выходим из режима и отдаём сообщение её обработчику."""
+    await state.clear()
+    raise SkipHandler()
 
 
 @router.message(SupportFlow.waiting_message)
@@ -86,14 +133,19 @@ async def support_send_to_admins(message: types.Message, state: FSMContext) -> N
             logger.warning(f"support: не удалось отправить обращение админу {admin_id}: {e}")
 
     if delivered == 0:
-        await message.answer("⚠️ Не удалось передать обращение администраторам. Попробуйте позже.")
+        # Состояние оставляем: пользователь может попробовать отправить ещё раз или нажать «Отмена»
+        await message.answer(
+            "⚠️ Не удалось передать обращение администраторам. Попробуйте позже.",
+            reply_markup=_cancel_kb,
+        )
         return
 
+    await state.clear()
     await message.answer(
         "✅ Ваше обращение отправлено администрации.\n"
-        "Можете отправить дополнительное сообщение, если нужно.",
+        "Ответ придёт сюда. Чтобы написать ещё — снова нажмите «📞 Поддержка».",
+        reply_markup=menu_kb(),
     )
-    await state.set_state(SupportFlow.waiting_message)
 
 
 @router.callback_query(F.data.startswith("support_reply_"), IsBotAdminFilter(ADMINS))
