@@ -16,7 +16,8 @@ from aiogram.types import Update
 from loguru import logger
 
 from data.config import ADMINS
-from services.error_notify import notify_admins_about_error
+from services.audit_log import audit_log_service
+from services.error_notify import _signature, notify_admins_about_error
 
 router = Router(name="errors.error_router")
 
@@ -29,6 +30,9 @@ _LOG_ONLY = (
     TelegramNetworkError,
     TelegramServerError,
 )
+
+# Действие в audit_logs: попадает в «📋 Логи» → «❌ Ошибки» (#96)
+HANDLER_ERROR_ACTION = "handler_error"
 
 
 def _describe(update: Update | None) -> tuple[str, int | None]:
@@ -52,6 +56,35 @@ def _describe(update: Update | None) -> tuple[str, int | None]:
     return f"Событие {update.event_type}", None
 
 
+def _actor_id(update: Update | None) -> int | None:
+    """Telegram id пользователя, на действии которого случилась ошибка."""
+    if update is None:
+        return None
+    if update.message and update.message.from_user:
+        return update.message.from_user.id
+    if update.callback_query:
+        return update.callback_query.from_user.id
+    return None
+
+
+async def _record_error(exc: BaseException, update: Update | None, description: str) -> None:
+    # Ошибка могла быть в самой базе — запись в журнал не должна ронять обработчик ошибок
+    try:
+        await audit_log_service.record_system_action(
+            actor_id=_actor_id(update),
+            action=HANDLER_ERROR_ACTION,
+            entity_type="bot",
+            entity_id=_signature(exc),
+            payload={
+                "error": type(exc).__name__,
+                "message": str(exc)[:500],
+                "context": description[:400],
+            },
+        )
+    except Exception as e:
+        logger.warning(f"Не удалось записать ошибку в audit_logs: {e}")
+
+
 @router.errors()
 class MyErrorHandler(ErrorHandler):
     async def handle(self) -> Any:
@@ -71,6 +104,7 @@ class MyErrorHandler(ErrorHandler):
             return True
 
         logger.opt(exception=exc).error(f"❗ Ошибка в обработчике | {description}")
+        await _record_error(exc, update, description)
 
         level = "Ошибка Telegram API" if isinstance(exc, TelegramAPIError) else "Ошибка в боте"
         await notify_admins_about_error(self.bot, exc, title=level, context=description)
