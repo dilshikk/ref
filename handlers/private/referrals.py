@@ -1,4 +1,5 @@
 import html
+from typing import Any, cast
 
 from aiogram import types, Router, F
 from loguru import logger
@@ -7,6 +8,7 @@ from filters import private_only
 from data.settings import get_settings, is_http_url
 from loader import db, bot                        # ✅ исправлен импорт
 from services.invite import ensure_invite_link    # ✅ отдельная строка
+from utils.invited_list import INVITED_LIST_LIMIT, format_invited_lines
 
 router = private_only(Router(name="private.referrals"))
 
@@ -99,12 +101,32 @@ async def top_referrals(message: types.Message) -> None:
 # ─────────────────────────────────────────────
 # 👥 Мои приглашённые
 # ─────────────────────────────────────────────
+async def _recent_invited(user_id: int) -> list[dict[str, Any]]:
+    """
+    #106: последние приглашённые с именем и датой. Раньше грузились ВСЕ записи
+    (select_invited_members) только ради проверки «есть ли кто-нибудь».
+    LIMIT в SQL — список не растёт вместе с числом приглашённых.
+    """
+    return cast(list[dict[str, Any]], await db.execute(
+        """
+        SELECT u.full_name, m.invited_at, m.reversed_at
+        FROM UserInviteMember m
+        LEFT JOIN Users u ON u.telegram_id = m.inveted_user_id
+        WHERE m.user_id = $1
+        ORDER BY m.invited_at DESC NULLS LAST, m.id DESC
+        LIMIT $2
+        """,
+        parameters=(user_id, INVITED_LIST_LIMIT),
+        fetchall=True,
+    ) or [])
+
+
 @router.message(F.text == "👥 Мои приглашённые")
 async def my_invited(message: types.Message) -> None:
     user_id = message.from_user.id
 
     try:
-        members = await db.select_invited_members(user_id=user_id)
+        members = await _recent_invited(user_id)
         record = await db.get_user_invited_count(user_id)
     except Exception as e:
         logger.error(f"my_invited db error [user={user_id}]: {e}")
@@ -122,10 +144,16 @@ async def my_invited(message: types.Message) -> None:
     history_count: int = record["history_count"] if record else 0
     earned_sum: int = int(record["earned_sum"] or 0) if record else 0
 
+    more = history_count - len(members)
+    tail = f"\n…и ещё <b>{more}</b>" if more > 0 else ""
+
     await message.answer(
         f"👥 <b>Ваши приглашённые</b>\n\n"
         f"✅ Активных: <b>{current_count}</b>\n"
         f"📊 Всего приглашено: <b>{history_count}</b>\n"
-        f"💰 Заработано всего: <b>{earned_sum}</b> сум",
+        f"💰 Заработано всего: <b>{earned_sum}</b> сум\n\n"
+        f"🕒 <b>Последние {len(members)}:</b>\n"
+        + "\n".join(format_invited_lines(members))
+        + tail,
         parse_mode="HTML",
     )
