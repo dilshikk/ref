@@ -1,9 +1,21 @@
 # /www/wwwroot/uz_ibot/handlers/private/profile_settings.py
+"""⚙ Настройки пользователя.
+
+#103: кнопка «🌐 Язык» убрана — все тексты бота только на русском, выбор ни на что
+не влиял. Колонку language в базе не трогаем: пригодится, если бот переведут.
+#104: «👤 Изменить имя» — имя экранируется, не-текст не роняет обработчик,
+кнопки меню и команды не сохраняются как имя. Имя видно в /top10 и списках админки.
+"""
+import html
+
 from aiogram import Router, types, F
+from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.fsm.context import FSMContext
+from aiogram.types import ReplyKeyboardMarkup
 from loguru import logger
 
 from filters import private_only
+from keyboards.reply_keyboards import menu_kb, reply_keyboard_for_admin
 from loader import db
 from states.flows import ReferralFlow
 from services.activity import activity_service
@@ -11,16 +23,25 @@ from services.audit_log import audit_log_service
 
 router = private_only(Router(name="private.profile_settings"))
 
-_LANG_NAMES: dict[str, str] = {
-    "ru": "🇷🇺 Русский",
-    "uz": "🇺🇿 O'zbek",
-}
+_NAME_MIN = 2
+_NAME_MAX = 64
+
+
+def _keyboard_texts(markup: ReplyKeyboardMarkup) -> set[str]:
+    return {button.text for row in markup.keyboard for button in row}
+
+
+def _is_menu_or_command(text: str) -> bool:
+    """Нажатая кнопка меню или команда — это не новое имя, а выход из ввода."""
+    if text.startswith("/"):
+        return True
+    menu_texts = _keyboard_texts(menu_kb()) | _keyboard_texts(reply_keyboard_for_admin())
+    return text in menu_texts | {"⬅ Назад", "⬅️ Назад", "🔙 Назад"}
 
 
 @router.message(F.text == "⚙ Настройки")
 async def settings_menu(message: types.Message) -> None:
     markup = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="🌐 Язык", callback_data="settings_lang")],
         [types.InlineKeyboardButton(text="👤 Изменить имя", callback_data="settings_name")],
     ])
     await message.answer("⚙ <b>Настройки</b>", parse_mode="HTML", reply_markup=markup)
@@ -32,63 +53,10 @@ async def settings_menu(message: types.Message) -> None:
     )
 
 
-@router.callback_query(F.data == "settings_lang")
-async def settings_lang(call: types.CallbackQuery) -> None:
-    await call.answer()
-
-    # Показываем текущий язык
-    current_lang = await db.get_user_language(call.from_user.id)
-
-    buttons = []
-    for code, label in _LANG_NAMES.items():
-        tick = " ✅" if code == current_lang else ""
-        buttons.append([
-            types.InlineKeyboardButton(
-                text=f"{label}{tick}",
-                callback_data=f"lang_{code}",
-            )
-        ])
-
-    await call.message.edit_text(
-        "🌐 <b>Выберите язык:</b>",
-        parse_mode="HTML",
-        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons),
-    )
-
-
-@router.callback_query(F.data.startswith("lang_"))
-async def set_language(call: types.CallbackQuery) -> None:
-    await call.answer()
-    lang = call.data.split("_")[1]
-
-    if lang not in _LANG_NAMES:
-        await call.answer("⚠️ Неизвестный язык.", show_alert=True)
-        return
-
-    old_lang = await db.get_user_language(call.from_user.id)
-    await db.set_user_language(call.from_user.id, lang)
-    await audit_log_service.record_user_action(
-        actor_id=call.from_user.id,
-        action="language_changed",
-        entity_type="user",
-        entity_id=call.from_user.id,
-        old_value={"language": old_lang},
-        new_value={"language": lang},
-        payload={"source": "settings_lang"},
-    )
-    await activity_service.record(
-        user_id=call.from_user.id,
-        event="language_changed",
-        chat_id=call.message.chat.id if call.message else None,
-        session_id=call.id,
-        payload={"language": lang},
-    )
-    logger.info(f"Пользователь {call.from_user.id} сменил язык на: {lang}")
-
-    await call.message.edit_text(
-        f"✅ Язык изменён на <b>{_LANG_NAMES[lang]}</b>",
-        parse_mode="HTML",
-    )
+@router.callback_query(F.data.in_({"settings_lang"}) | F.data.startswith("lang_"))
+async def language_removed(call: types.CallbackQuery) -> None:
+    # Старые сообщения с кнопкой «🌐 Язык» остались в чатах — отвечаем, а не молчим (#103)
+    await call.answer("Бот пока работает только на русском языке.", show_alert=True)
 
 
 @router.callback_query(F.data == "settings_name")
@@ -97,7 +65,11 @@ async def settings_name(call: types.CallbackQuery, state: FSMContext) -> None:
     markup = types.InlineKeyboardMarkup(inline_keyboard=[[
         types.InlineKeyboardButton(text="❌ Отмена", callback_data="settings_name_cancel")
     ]])
-    await call.message.answer("👤 Введите новое имя:", reply_markup=markup)
+    await call.message.answer(
+        f"👤 Введите новое имя ({_NAME_MIN}–{_NAME_MAX} символов).\n"
+        "Оно показывается в /top10.",
+        reply_markup=markup,
+    )
     await state.set_state(ReferralFlow.CHANGE_NAME)
 
 
@@ -110,14 +82,24 @@ async def settings_name_cancel(call: types.CallbackQuery, state: FSMContext) -> 
 
 @router.message(ReferralFlow.CHANGE_NAME)
 async def save_new_name(message: types.Message, state: FSMContext) -> None:
-    new_name = message.text.strip()
-
-    if len(new_name) < 2:
-        await message.reply("⚠️ Имя слишком короткое. Минимум 2 символа.")
+    # #104: фото/стикер вместо текста раньше роняли обработчик (message.text is None)
+    if message.text is None:
+        await message.reply("⚠️ Отправьте имя текстом или нажмите «❌ Отмена».")
         return
 
-    if len(new_name) > 64:
-        await message.reply("⚠️ Имя слишком длинное. Максимум 64 символа.")
+    new_name = message.text.strip()
+
+    if _is_menu_or_command(new_name):
+        # Пользователь нажал кнопку меню — выходим из ввода и отдаём сообщение её обработчику
+        await state.clear()
+        raise SkipHandler()
+
+    if len(new_name) < _NAME_MIN:
+        await message.reply(f"⚠️ Имя слишком короткое. Минимум {_NAME_MIN} символа.")
+        return
+
+    if len(new_name) > _NAME_MAX:
+        await message.reply(f"⚠️ Имя слишком длинное. Максимум {_NAME_MAX} символа.")
         return
 
     current_user = await db.select_user(telegram_id=message.from_user.id)
@@ -140,8 +122,10 @@ async def save_new_name(message: types.Message, state: FSMContext) -> None:
         payload={"full_name": new_name},
     )
     await state.clear()
+    # #104: без экранирования имя с < или & ломало HTML, и Telegram отклонял ответ
     await message.answer(
-        f"✅ Имя изменено на <b>{new_name}</b>",
+        f"✅ Имя изменено на <b>{html.escape(new_name)}</b>",
         parse_mode="HTML",
+        reply_markup=menu_kb(),
     )
     logger.info(f"Пользователь {message.from_user.id} изменил имя на: {new_name!r}")
