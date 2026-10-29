@@ -1,5 +1,6 @@
 # handlers/private/admin/security.py
-"""🔒 Безопасность: баны, ограничения, антифрод-лимит."""
+"""🔒 Безопасность: баны и антифрод-лимит.
+Заглушки «🚫 Бан групп», «📋 Белый список» и дубль лимитов «📱 Ограничения» удалены (#83, #92, #94)."""
 from typing import Any, cast
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
@@ -15,12 +16,11 @@ from data.config import ADMINS, url_yaml
 from data.settings import get_settings
 from utils.yaml_io import save_url_yaml
 
-from .common import cancel_kb, forms_router, get_user_totals, record_setting_change, show_placeholder
+from .common import cancel_kb, forms_router, get_user_totals, record_setting_change
 
 router = private_only(Router(name="private.admin.security"))
 
 # Показываем значения через get_settings() — те же, по которым работает бот (#49).
-# Раньше здесь было url_yaml.get(..., 100), а бот по умолчанию считал лимит 20.
 # url_yaml остаётся только для записи новых значений и для old_value в аудите.
 
 
@@ -39,48 +39,17 @@ async def security_ban_users(message: types.Message):
     users = await get_user_totals()
     await message.answer(
         "🚫 <b>Бан пользователей</b>\n\n"
-        f"Заблокировано: <b>{users['blocked_users']}</b>",
+        f"Заблокировано: <b>{users['blocked_users']}</b>\n\n"
+        "Чтобы заблокировать, откройте пользователя через «🔍 Поиск пользователя» "
+        "в разделе «👥 Пользователи».",
         parse_mode="HTML",
         reply_markup=security_kb(),
-    )
-
-
-@router.message(F.text == "🚫 Бан групп", IsBotAdminFilter(ADMINS))
-async def security_ban_groups(message: types.Message):
-    await show_placeholder(
-        message,
-        "🚫 Бан групп",
-        "Механизм блокировки групп можно добавить отдельной таблицей blacklist.",
-        security_kb(),
     )
 
 
 @router.message(F.text == "🛡 Антиспам", IsBotAdminFilter(ADMINS))
 async def security_antispam(message: types.Message):
     await edit_antispam_limit(message)
-
-
-@router.message(F.text == "📱 Ограничения", IsBotAdminFilter(ADMINS))
-async def security_limits(message: types.Message):
-    settings = get_settings()
-    await show_placeholder(
-        message,
-        "📱 Ограничения",
-        f"Антифрод лимит: <b>{settings.antispam_referral_limit}</b> в час, "
-        f"<b>{settings.antispam_referral_daily_limit}</b> в сутки\n"
-        f"Порог участников для вывода: <b>{settings.group_member_count}</b>",
-        security_kb(),
-    )
-
-
-@router.message(F.text == "📋 Белый список", IsBotAdminFilter(ADMINS))
-async def security_whitelist(message: types.Message):
-    await show_placeholder(
-        message,
-        "📋 Белый список",
-        "Белый список можно подключить через отдельную таблицу разрешённых ID.",
-        security_kb(),
-    )
 
 
 @router.message(F.text == "🚨 Антифрод лимит", IsBotAdminFilter(ADMINS))
