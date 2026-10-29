@@ -17,20 +17,24 @@ approved_/rejected_/payout_receipt_input из admin_panel больше не ср
   из группы). Проверка идёт в том же SQL, что и списание, — атомарно.
 - одобрять/отклонять выплаты может только MONEY_ADMINS (#23); остальным админам
   отвечает money_guard, и до старых обработчиков admin_panel нажатие не доходит.
+- список «💰 Заявки на выплаты» перехватывается здесь: полный номер карты видит
+  только MONEY_ADMINS, остальные админы — маску ****1234 (#20).
 """
+import html
 from typing import Any, cast
 
 from aiogram import F, Router, types
 from aiogram.fsm.context import FSMContext
 from loguru import logger
 
-from data.config import ADMINS, GROUP_ID, url_yaml
+from data.config import ADMINS, GROUP_ID, MONEY_ADMINS, url_yaml
 from filters import private_only
 from filters.admin import IsAdminWithoutMoneyRights, IsBotAdminFilter, IsMoneyAdmin
 from keyboards.reply_keyboards import finance_kb
 from loader import db
 from states.flows import AdminFlow
 from handlers.private.admin_panel import _send_payout_report
+from utils import payment_details
 
 router = private_only(Router(name="private.payout_guard"))
 
@@ -88,6 +92,38 @@ def _parse_req_id(data: str) -> int | None:
 
 # Денежные кнопки, которые может нажимать только MONEY_ADMINS (#23).
 _MONEY_CALLBACK_PREFIXES = ("approved_", "rejected_", "umgmt_addbal_", "umgmt_reset_", "umgmt_resetok_", "hold_ok_", "hold_no_")
+
+
+@router.message(F.text == "💰 Заявки на выплаты", IsBotAdminFilter(ADMINS))
+async def list_payouts(message: types.Message) -> None:
+    """Список заявок: реквизиты полностью — только MONEY_ADMINS, остальным маска (#20)."""
+    payouts = cast(list[dict[str, Any]], await db.get_pending_payouts() or [])
+    if not payouts:
+        await message.answer("✅ Нет активных заявок на выплату.")
+        return
+
+    await message.answer(f"💸 <b>Заявок на выплату: {len(payouts)}</b>", parse_mode="HTML")
+
+    viewer_id = message.from_user.id if message.from_user else 0
+    show_full = viewer_id in MONEY_ADMINS
+
+    for req in payouts:
+        card = str(req.get("card_number") or "")
+        card_text = card if show_full else payment_details.mask(card)
+        markup = types.InlineKeyboardMarkup(
+            inline_keyboard=[[
+                types.InlineKeyboardButton(text="✅ Одобрить", callback_data=f"approved_{req['user_id']}_{req['id']}"),
+                types.InlineKeyboardButton(text="❌ Отклонить", callback_data=f"rejected_{req['user_id']}_{req['id']}"),
+            ]]
+        )
+        await message.answer(
+            f"🆔 <b>{req['id']}</b> | "
+            f"👤 <a href='tg://user?id={req['user_id']}'>{html.escape(str(req.get('full_name') or '-'))}</a>\n"
+            f"💳 <code>{html.escape(card_text)}</code>\n"
+            f"📅 {req.get('created_at')}",
+            parse_mode="HTML",
+            reply_markup=markup,
+        )
 
 
 @router.callback_query(F.data.startswith(_MONEY_CALLBACK_PREFIXES), IsAdminWithoutMoneyRights())
