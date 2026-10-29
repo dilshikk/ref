@@ -1,7 +1,5 @@
-"""Тесты чтения настроек (#22, #18, #88). Запуск: python -m pytest tests"""
+"""Тесты чтения настроек (#22, #18, #88, #113). Запуск: python -m pytest tests"""
 import importlib.util
-import sys
-import types
 from pathlib import Path
 
 import pytest
@@ -10,16 +8,14 @@ _PATH = Path(__file__).resolve().parent.parent / "data" / "settings.py"
 
 
 @pytest.fixture
-def load(monkeypatch):
-    """Грузит data/settings.py с подменённым url_yaml: настоящий data.config
-    требует BOT_TOKEN и файл url.yml."""
-    def _load(url_yaml: dict):
-        config = types.ModuleType("data.config")
-        config.url_yaml = url_yaml
-        monkeypatch.setitem(sys.modules, "data.config", config)
+def load():
+    """Грузит data/settings.py отдельной копией и заполняет кэш настроек так,
+    как это делает load_settings() после чтения таблицы bot_settings."""
+    def _load(values: dict):
         spec = importlib.util.spec_from_file_location("settings_under_test", _PATH)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        module.replace_cache(values)
         return module
     return _load
 
@@ -71,10 +67,9 @@ def test_zero_hold_hours_is_allowed(load):
 
 
 def test_changes_apply_without_restart(load):
-    url_yaml = {"invited_credit": 100}
-    module = load(url_yaml)
+    module = load({"invited_credit": 100})
     assert module.get_settings().invited_credit == 100
-    url_yaml["invited_credit"] = 250  # так пишет админка
+    module.cache_set("invited_credit", 250)  # так пишет set_setting() из админки
     assert module.get_settings().invited_credit == 250
 
 
@@ -103,8 +98,16 @@ def test_custom_text_is_escaped_and_fills_name(load):
 
 
 def test_custom_text_changes_apply_without_restart(load):
-    url_yaml: dict = {}
-    module = load(url_yaml)
+    module = load({})
     assert module.custom_text("support") is None
-    url_yaml["text_templates"] = {"support": "Пишите нам"}  # так пишет «📝 Тексты»
+    module.cache_set("text_templates", {"support": "Пишите нам"})  # так пишет «📝 Тексты»
     assert module.custom_text("support") == "Пишите нам"
+
+
+def test_group_and_money_admins(load):
+    # #116: группа и денежные админы теперь тоже в bot_settings
+    s = load({"group_id": "-1001234567890", "log_group_id": "", "money_admins": [222, "111", 0, "x"]}).get_settings()
+    assert s.group_id == -1001234567890
+    assert s.log_group_id is None
+    assert s.money_admins == (111, 222)
+    assert load({}).get_settings().money_admins == ()
