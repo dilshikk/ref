@@ -23,7 +23,6 @@ from keyboards.reply_keyboards import (
     security_kb,
     settings_kb,
     subscription_kb,
-    tariffs_kb,
     users_kb,
 )
 from loader import db, bot as app_bot
@@ -39,14 +38,6 @@ router = private_only(Router(name="private.admin_panel"))
 
 _cancel_kb = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton(text="🔙 Назад")]],
-    resize_keyboard=True,
-)
-
-_payout_receipt_kb = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="⏭ Без чека")],
-        [KeyboardButton(text="🔙 Назад")],
-    ],
     resize_keyboard=True,
 )
 
@@ -494,62 +485,6 @@ async def _open_logs_view(
         await cast(Any, edit_message).edit_text(text, parse_mode="HTML", reply_markup=kb)
         return
     await message.answer(text, parse_mode="HTML", reply_markup=kb)
-
-
-async def _show_activity_logs(message: types.Message, title: str, where_sql: str = "", params: tuple[Any, ...] = ()) -> None:
-    query = (
-        "SELECT user_id, event, chat_id, created_at, payload "
-        "FROM user_activity "
-        f"{where_sql} "
-        "ORDER BY created_at DESC LIMIT $1"
-    )
-    rows = cast(list[dict[str, Any]], await db.execute(query, parameters=(*params, 15), fetchall=True) or [])
-    if not rows:
-        await message.answer(f"<b>{title}</b>\n\nЗаписей пока нет.", parse_mode="HTML", reply_markup=logs_kb())
-        return
-
-    lines = []
-    for row in rows:
-        lines.append(
-            f"• <b>{_fmt_dt(row.get('created_at'))}</b> | user: <code>{row.get('user_id')}</code>\n"
-            f"  event: <code>{_short_text(row.get('event'), 60)}</code>\n"
-            f"  chat: <code>{row.get('chat_id') or '-'}</code>\n"
-            f"  payload: <code>{_payload_preview(row.get('payload'))}</code>"
-        )
-
-    await message.answer(
-        f"<b>{title}</b>\n\n" + "\n\n".join(lines),
-        parse_mode="HTML",
-        reply_markup=logs_kb(),
-    )
-
-
-async def _show_audit_logs(message: types.Message, title: str, where_sql: str = "", params: tuple[Any, ...] = ()) -> None:
-    query = (
-        "SELECT actor_id, actor_type, action, entity_type, entity_id, payload, created_at "
-        "FROM audit_logs "
-        f"{where_sql} "
-        "ORDER BY created_at DESC LIMIT $1"
-    )
-    rows = cast(list[dict[str, Any]], await db.execute(query, parameters=(*params, 15), fetchall=True) or [])
-    if not rows:
-        await message.answer(f"<b>{title}</b>\n\nЗаписей пока нет.", parse_mode="HTML", reply_markup=logs_kb())
-        return
-
-    lines = []
-    for row in rows:
-        lines.append(
-            f"• <b>{_fmt_dt(row.get('created_at'))}</b> | actor: <code>{row.get('actor_id') or '-'}</code> ({row.get('actor_type')})\n"
-            f"  action: <code>{_short_text(row.get('action'), 70)}</code>\n"
-            f"  entity: <code>{row.get('entity_type') or '-'}</code> / <code>{_short_text(row.get('entity_id'), 40)}</code>\n"
-            f"  payload: <code>{_payload_preview(row.get('payload'))}</code>"
-        )
-
-    await message.answer(
-        f"<b>{title}</b>\n\n" + "\n\n".join(lines),
-        parse_mode="HTML",
-        reply_markup=logs_kb(),
-    )
 
 
 def _scheduled_status_text(status: str) -> str:
@@ -1814,129 +1749,6 @@ async def refresh_bot_menu(message: types.Message):
         parse_mode="HTML",
         reply_markup=bot_menu_settings_kb(),
     )
-
-
-@router.message(F.text == "💰 Заявки на выплаты", IsBotAdminFilter(ADMINS))
-async def list_payouts(message: types.Message):
-    payouts = cast(list[dict[str, Any]], await db.get_pending_payouts() or [])
-    if not payouts:
-        await message.answer("✅ Нет активных заявок на выплату.")
-        return
-
-    await message.answer(f"💸 <b>Заявок на выплату: {len(payouts)}</b>", parse_mode="HTML")
-
-    for req in payouts:
-        markup = types.InlineKeyboardMarkup(
-            inline_keyboard=[[
-                types.InlineKeyboardButton(
-                    text="✅ Одобрить",
-                    callback_data=f"approved_{req['user_id']}_{req['id']}"
-                ),
-                types.InlineKeyboardButton(
-                    text="❌ Отклонить",
-                    callback_data=f"rejected_{req['user_id']}_{req['id']}"
-                ),
-            ]]
-        )
-        await message.answer(
-            f"🆔 <b>{req['id']}</b> | "
-            f"👤 <a href='tg://user?id={req['user_id']}'>{req['full_name']}</a>\n"
-            f"💳 <code>{req['card_number']}</code>\n"
-            f"📅 {req['created_at']}",
-            parse_mode="HTML",
-            reply_markup=markup,
-        )
-
-
-@router.callback_query(F.data.startswith("approved_"), IsBotAdminFilter(ADMINS))
-async def payment_confirmed(call: types.CallbackQuery, state: FSMContext):
-    if not call.data or not call.message:
-        return
-    parts = call.data.split("_")
-    user_id = int(parts[1])
-    req_id = int(parts[2])
-
-    message_any = cast(Any, call.message)
-    if hasattr(message_any, "edit_reply_markup"):
-        await message_any.edit_reply_markup(reply_markup=None)
-
-    await state.update_data(payout_user_id=user_id, payout_req_id=req_id, payout_admin_id=call.from_user.id)
-    await state.set_state(AdminFlow.payout_receipt_input)
-    await cast(Any, call.message).answer(
-        "Пришлите чек перевода (фото/документ) или нажмите «⏭ Без чека».\n"
-        "После этого выплата будет подтверждена окончательно.",
-        reply_markup=_payout_receipt_kb,
-    )
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("rejected_"), IsBotAdminFilter(ADMINS))
-async def payment_canceled(call: types.CallbackQuery):
-    if not call.data or not call.message:
-        return
-    parts = call.data.split("_")
-    user_id = int(parts[1])
-    req_id = int(parts[2])
-
-    await db.update_payout_status(req_id, "rejected")
-    message_any = cast(Any, call.message)
-    if hasattr(message_any, "edit_reply_markup"):
-        await message_any.edit_reply_markup(reply_markup=None)
-    if call.bot is None:
-        return
-    await call.bot.send_message(user_id, "❌ Выплата отменена. Попробуйте позже снова.")
-
-
-@router.message(AdminFlow.payout_receipt_input, IsBotAdminFilter(ADMINS))
-async def payout_finalize_with_receipt(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    user_id = int(data.get("payout_user_id") or 0)
-    req_id = int(data.get("payout_req_id") or 0)
-    admin_id = int(data.get("payout_admin_id") or 0)
-    if user_id <= 0 or req_id <= 0 or admin_id <= 0:
-        await message.answer("⚠️ Сессия подтверждения устарела. Повторите через список заявок.", reply_markup=finance_kb())
-        await state.clear()
-        return
-
-    include_receipt = False
-    if message.text:
-        if (message.text or "").strip() != "⏭ Без чека":
-            await message.answer("Отправьте фото/документ чека или нажмите «⏭ Без чека».", reply_markup=_payout_receipt_kb)
-            return
-    elif message.photo or message.document:
-        include_receipt = True
-    else:
-        await message.answer("Поддерживается чек как фото/документ или кнопка «⏭ Без чека».", reply_markup=_payout_receipt_kb)
-        return
-
-    payout_row = cast(dict[str, Any] | None, await db.get_payout_request_by_id(req_id))
-    if not payout_row:
-        await message.answer("⚠️ Заявка не найдена.", reply_markup=finance_kb())
-        await state.clear()
-        return
-
-    await db.update_payout_status(req_id, "approved")
-    await db.update_invite_current_count_set_0(user_id)
-
-    bot = message.bot
-    if bot is not None:
-        await bot.send_message(user_id, "✅ Средства успешно переведены на ваш счёт!")
-
-    report_sent = False
-    try:
-        report_sent = await _send_payout_report(message, payout_row, admin_id=admin_id, include_receipt=include_receipt)
-    except Exception as e:
-        logger.warning(f"Не удалось отправить отчет о выплате в группу: {e}")
-
-    if report_sent:
-        await message.answer("✅ Выплата подтверждена. Отчет отправлен в группу выплат.", reply_markup=finance_kb())
-    else:
-        await message.answer(
-            "✅ Выплата подтверждена.\n"
-            "⚠️ Отчет в группу не отправлен: задайте payment_chat_id (или @channel / -100...) в конфиге.",
-            reply_markup=finance_kb(),
-        )
-    await state.clear()
 
 
 # ==========================
