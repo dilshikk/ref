@@ -1,12 +1,12 @@
 # Bot framework
-aiogram==3.29.1
+aiogram==3.31.0
 
 # Database
-SQLAlchemy==2.0.32
-asyncpg==0.31.0
+SQLAlchemy==2.1.6
+asyncpg==0.32.0
 
 # Config and logging
-environs==15.0.1
+environs==15.2.0
 PyYAML==6.0.3
 loguru==0.7.3
 
