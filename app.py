@@ -112,6 +112,8 @@ async def database_connected() -> None:
     await db.ensure_referral_reversal_columns()
     # Реквизиты выплат: колонка TEXT и шифрование старых заявок (#20)
     await db.ensure_payout_card_encryption()
+    # Одна заявка на вывод в ожидании на пользователя — защита от дублей в БД (#47)
+    await db.ensure_unique_pending_payout()
     # Рассылки: прогресс по получателям и пометка заблокировавших бота (#19)
     await db.ensure_broadcast_progress_columns()
 
