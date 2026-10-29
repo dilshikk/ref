@@ -1,7 +1,8 @@
-# /www/wwwroot/uz_ibot/handlers/private/user_management.py
+import html
 import math
 
 from aiogram import Router, types, F
+from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.context import FSMContext
 from loguru import logger
 
@@ -27,10 +28,12 @@ def profile_text(p) -> str:
     # Баланс хранится в деньгах: смена цены за реферала его не пересчитывает
     balance = int(p.get("balance_sum") or 0)
     blocked = "🚫 Заблокирован" if p["is_blocked"] else "✅ Активен"
-    username = f"@{p['username']}" if p["username"] else "—"
+    # Имя и username задаёт сам пользователь: без экранирования «<b» или «a & b»
+    # ломали HTML, и админ не мог открыть профиль (#50)
+    username = f"@{html.escape(p['username'])}" if p["username"] else "—"
     created_at = p["created_at"].strftime("%d.%m.%Y %H:%M") if p.get("created_at") else "—"
     return (
-        f"👤 <b>{p['full_name']}</b>\n"
+        f"👤 <b>{html.escape(p['full_name'] or '—')}</b>\n"
         f"🆔 ID: <code>{p['telegram_id']}</code>\n"
         f"📎 Username: {username}\n"
         f"💰 Баланс: <b>{balance}</b> сум\n"
@@ -99,10 +102,10 @@ async def show_users_page(event: types.Message | types.CallbackQuery, page: int)
     else:
         lines = []
         for u in users:
-            username = f"@{u['username']}" if u["username"] else "—"
+            username = f"@{html.escape(u['username'])}" if u["username"] else "—"
             blocked = " 🚫" if u["is_blocked"] else ""
             lines.append(
-                f"• <a href='tg://user?id={u['telegram_id']}'>{u['full_name']}</a> "
+                f"• <a href='tg://user?id={u['telegram_id']}'>{html.escape(u['full_name'] or '—')}</a> "
                 f"({username}){blocked} — /uid{u['telegram_id']}"
             )
         text = (
@@ -145,7 +148,7 @@ async def search_process(message: types.Message, state: FSMContext) -> None:
 
     buttons = [
         [types.InlineKeyboardButton(
-            text=f"{u['full_name']} (@{u['username']}" if u["username"] else f"{u['full_name']} (без username)",
+            text=f"{u['full_name']} (@{u['username']})" if u["username"] else f"{u['full_name']} (без username)",
             callback_data=f"umgmt_profile_{u['telegram_id']}"
         )]
         for u in users
@@ -276,8 +279,8 @@ async def add_balance_process(message: types.Message, state: FSMContext) -> None
             f"🎁 Администратор начислил вам бонус: <b>+{amount * invited_credit}</b> сум!",
             parse_mode="HTML",
         )
-    except Exception:
-        pass
+    except TelegramAPIError as e:
+        logger.info(f"Не удалось уведомить {telegram_id} о бонусе: {e}")
 
 
 # ======================================================
@@ -341,8 +344,8 @@ async def block_user(call: types.CallbackQuery) -> None:
     await call.answer("🚫 Пользователь заблокирован.", show_alert=True)
     try:
         await bot.send_message(telegram_id, "🚫 Ваш аккаунт был заблокирован администратором.")
-    except Exception:
-        pass
+    except TelegramAPIError as e:
+        logger.info(f"Не удалось уведомить {telegram_id} о блокировке: {e}")
     await show_profile(call, telegram_id)
 
 
@@ -362,8 +365,8 @@ async def unblock_user(call: types.CallbackQuery) -> None:
     await call.answer("✅ Пользователь разблокирован.", show_alert=True)
     try:
         await bot.send_message(telegram_id, "✅ Ваш аккаунт был разблокирован администратором.")
-    except Exception:
-        pass
+    except TelegramAPIError as e:
+        logger.info(f"Не удалось уведомить {telegram_id} о разблокировке: {e}")
     await show_profile(call, telegram_id)
 
 
@@ -386,6 +389,11 @@ async def send_message_start(call: types.CallbackQuery, state: FSMContext) -> No
 
 @router.message(UserManagementFlow.send_message_input, IsBotAdminFilter(ADMINS))
 async def send_message_process(message: types.Message, state: FSMContext) -> None:
+    # Без текста (фото, стикер) пользователь получил бы «None»
+    if not message.text:
+        await message.answer("✍️ Отправьте сообщение текстом.")
+        return
+
     data = await state.get_data()
     telegram_id = data["target_user_id"]
     await state.clear()
@@ -403,8 +411,9 @@ async def send_message_process(message: types.Message, state: FSMContext) -> Non
         logger.success(f"📩 Сообщение отправлено пользователю {telegram_id}")
     except Exception as e:
         logger.error(f"Ошибка отправки сообщения {telegram_id}: {e}")
+        # В тексте ошибки Telegram есть < и >: без экранирования не уходил и этот ответ
         await message.answer(
-            f"❌ Не удалось отправить сообщение: <code>{e}</code>",
+            f"❌ Не удалось отправить сообщение: <code>{html.escape(str(e))}</code>",
             parse_mode="HTML",
         )
 
