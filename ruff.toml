@@ -10,5 +10,3 @@ select = ["F"]
 [lint.per-file-ignores]
 # В __init__.py импорты — это реэкспорт
 "__init__.py" = ["F401", "F403", "F405"]
-# Неиспользуемый импорт tariffs_kb в админке
-"handlers/private/admin_panel.py" = ["F401"]
