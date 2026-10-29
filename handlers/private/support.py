@@ -6,7 +6,7 @@
 - после отправки обращения состояние сбрасывается;
 - на шаге ввода есть inline-кнопка «❌ Отмена»;
 - кнопка меню или команда во время ввода закрывают режим и обрабатываются
-  как обычно (SkipHandler передаёт сообщение дальше по роутерам).
+  как обычно (SkipHandler передаёт сообщение следующим роутерам).
 """
 import html
 
@@ -38,6 +38,12 @@ def _keyboard_texts(*keyboards: ReplyKeyboardMarkup) -> frozenset[str]:
 
 # Тексты кнопок меню: такое сообщение — не обращение, а нажатие кнопки
 _MENU_TEXTS = _keyboard_texts(menu_kb(), reply_keyboard_for_admin()) | {"⬅ Назад", "⬅️ Назад", "🔙 Назад"}
+
+
+def is_menu_or_command(text: str | None) -> bool:
+    if not text:
+        return False
+    return text in _MENU_TEXTS or text.startswith("/")
 
 
 def _support_preview(message: types.Message) -> str:
@@ -79,7 +85,7 @@ async def support(message: types.Message, state: FSMContext) -> None:
 async def support_cancel(call: types.CallbackQuery, state: FSMContext) -> None:
     if await state.get_state() == SupportFlow.waiting_message.state:
         await state.clear()
-    if call.message is not None and isinstance(call.message, types.Message):
+    if isinstance(call.message, types.Message):
         try:
             await call.message.edit_reply_markup(reply_markup=None)
         except Exception as e:
@@ -88,15 +94,15 @@ async def support_cancel(call: types.CallbackQuery, state: FSMContext) -> None:
     await call.answer()
 
 
-@router.message(SupportFlow.waiting_message, F.text.func(lambda t: t in _MENU_TEXTS or t.startswith("/")))
-async def support_exit_on_menu(message: types.Message, state: FSMContext) -> None:
-    """Кнопка меню или команда — выходим из режима и отдаём сообщение её обработчику."""
-    await state.clear()
-    raise SkipHandler()
-
-
 @router.message(SupportFlow.waiting_message)
 async def support_send_to_admins(message: types.Message, state: FSMContext) -> None:
+    if is_menu_or_command(message.text):
+        # Это нажатие кнопки меню или команда, а не обращение: выходим из режима
+        # и отдаём сообщение обработчикам в следующих роутерах (обработчик —
+        # последний в этом роутере, поэтому SkipHandler уходит дальше).
+        await state.clear()
+        raise SkipHandler()
+
     user = message.from_user
     if user is None:
         return
@@ -133,7 +139,7 @@ async def support_send_to_admins(message: types.Message, state: FSMContext) -> N
             logger.warning(f"support: не удалось отправить обращение админу {admin_id}: {e}")
 
     if delivered == 0:
-        # Состояние оставляем: пользователь может попробовать отправить ещё раз или нажать «Отмена»
+        # Состояние оставляем: можно отправить ещё раз или нажать «Отмена»
         await message.answer(
             "⚠️ Не удалось передать обращение администраторам. Попробуйте позже.",
             reply_markup=_cancel_kb,
