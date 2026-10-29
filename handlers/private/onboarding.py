@@ -9,7 +9,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from loguru import logger
 
 from filters import private_only
-from data.config import url_yaml
+from data.settings import get_settings
 from keyboards.inline_keyboards.actions import subscribe_keyboard_invited, subscribe_keyboard
 from keyboards.reply_keyboards.menu import menu_kb
 from loader import db
@@ -25,15 +25,15 @@ _SUBSCRIBE_TEXT = "Чтобы пользоваться ботом, подпиш�
 
 
 def _start_pitch(full_name: str) -> str:
-    invited_credit = int(url_yaml.get("invited_credit", 0) or 0)
-    min_balance = int(url_yaml.get("min_balance", 0) or 0)
+    # get_settings(): нечисловое значение в url.yml больше не роняет /start (#22)
+    settings = get_settings()
     # Имя экранируем: символы < > & в имени ломали HTML, Telegram отклонял
     # сообщение, и пользователь на /start не получал ничего
     return (
         f"👋 Привет, <b>{html.escape(full_name)}</b>!\n\n"
         "💸 <b>Здесь вы зарабатываете на приглашениях</b>\n"
-        f"• За каждого приглашённого: <b>{invited_credit} сум</b>\n"
-        f"• Минимальный вывод: <b>{min_balance} сум</b>\n"
+        f"• За каждого приглашённого: <b>{settings.invited_credit} сум</b>\n"
+        f"• Минимальный вывод: <b>{settings.min_balance} сум</b>\n"
         "• Прозрачные выплаты через публичный чат\n\n"
         "🚀 <b>Начните за 30 секунд:</b>\n"
         "1) Откройте «🔗 Моя реферальная ссылка»\n"

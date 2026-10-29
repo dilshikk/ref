@@ -5,37 +5,20 @@ from aiogram import Bot, Router, types, F
 from loguru import logger
 from filters import private_only
 from keyboards.inline_keyboards.actions import url_button
-from data.config import url_yaml
+from data.settings import get_settings
 from loader import db
 
 router = private_only(Router(name="private.fallback"))
 
 
 def _poll_config() -> tuple[str, list[str]]:
-    default_question = "Насколько вам удобен наш бот?"
-    default_options = ["Отлично", "Нормально", "Нужно улучшить"]
-
-    question = str(url_yaml.get("poll_question") or default_question).strip()
-    raw_options = url_yaml.get("poll_options")
-
-    if isinstance(raw_options, list):
-        options = [str(x).strip() for x in raw_options if str(x).strip()]
-    elif isinstance(raw_options, str):
-        options = [part.strip() for part in raw_options.split("|") if part.strip()]
-    else:
-        options = []
-
-    if len(options) < 2:
-        options = default_options
-
-    return question, options[:10]
+    # Разбор вопроса и вариантов (с умолчаниями и лимитом Telegram) — в get_settings()
+    settings = get_settings()
+    return settings.poll_question, list(settings.poll_options)
 
 
 def _vote_credit() -> int:
-    try:
-        return max(0, int(url_yaml.get("vote_credit", 0) or 0))
-    except (TypeError, ValueError):
-        return 0
+    return get_settings().vote_credit
 
 
 @router.message(F.text == "🗳 Голосование")

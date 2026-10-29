@@ -3,7 +3,7 @@ from aiogram import types, Router, F
 from loguru import logger
 
 from filters import private_only
-from data.config import url_yaml
+from data.settings import get_settings, is_http_url
 from loader import db, bot                        # ✅ исправлен импорт
 from services.invite import ensure_invite_link    # ✅ отдельная строка
 
@@ -42,8 +42,8 @@ async def referral_link(message: types.Message) -> None:
 # ─────────────────────────────────────────────
 @router.message(F.text.in_({"📢 Чат выплат", "📜 Канал выплат"}))
 async def payment_channel(message: types.Message) -> None:
-    channel_link = str(url_yaml.get("payment_channel") or "").strip()
-    if channel_link.startswith("http://") or channel_link.startswith("https://"):
+    channel_link = get_settings().payment_channel
+    if is_http_url(channel_link):
         await message.answer(
             "📢 <b>Чат/канал выплат</b>\n\n"
             "Здесь публикуются подтверждения выплат, чтобы вы могли видеть прозрачность транзакций:\n"
