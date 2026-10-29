@@ -1,0 +1,109 @@
+# services/group_adds.py
+"""
+Проверка добавленных в группу перед зачётом в норму «добавил N участников» (#18).
+
+Проверка запускается по кнопке «✅ Я добавил(а)», без фоновых задач:
+для каждого непроверенного добавленного собираем сигналы (БД + Telegram)
+и решаем — засчитать, подождать или отклонить.
+"""
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass
+from typing import Any
+
+from aiogram.exceptions import TelegramBadRequest
+from loguru import logger
+
+from data.settings import get_settings
+from loader import bot, db
+from utils.account_quality import MemberSignals, evaluate, is_enabled, is_member_status
+
+_BATCH_LIMIT = 50
+# Не больше стольких запросов к Telegram одновременно
+_telegram_slots = asyncio.Semaphore(5)
+# Ответы Telegram, после которых участника точно нет
+_GONE_MARKERS = ("user not found", "participant_id_invalid", "user_id_invalid")
+
+
+@dataclass(frozen=True)
+class QualifyReport:
+    qualified: int = 0
+    rejected: int = 0
+    waiting: int = 0
+
+
+def qualification_enabled() -> bool:
+    s = get_settings()
+    return is_enabled(s.add_min_hours, s.add_min_score)
+
+
+async def _has_photo(member_id: int) -> bool:
+    try:
+        photos = await bot.get_user_profile_photos(member_id, limit=1)
+    except Exception as e:
+        logger.debug(f"Фото профиля {member_id} не получено: {e}")
+        return False
+    return bool(photos.total_count)
+
+
+async def _collect(row: Any, group_id: int) -> MemberSignals | None:
+    """Сигналы участника. None — Telegram не ответил, решение откладываем (а не засчитываем)."""
+    member_id = int(row["member_id"])
+    async with _telegram_slots:
+        try:
+            member = await bot.get_chat_member(chat_id=group_id, user_id=member_id)
+        except TelegramBadRequest as e:
+            if any(m in str(e).lower() for m in _GONE_MARKERS):
+                # Аккаунт удалён или не состоит в группе — засчитывать некого
+                logger.info(f"Добавленный {member_id} не найден в группе: {e}")
+                return MemberSignals(0, False, False, False, False, False, False)
+            # Например, бот потерял права в группе: решение откладываем, а не отклоняем всех
+            logger.warning(f"Не удалось проверить добавленного {member_id}: {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"Не удалось проверить добавленного {member_id}: {e}")
+            return None
+        has_photo = await _has_photo(member_id)
+    user = getattr(member, "user", None)
+    return MemberSignals(
+        hours_in_group=float(row["hours_in_group"] or 0),
+        still_member=is_member_status(member),
+        wrote_in_group=bool(row["wrote_in_group"]),
+        started_bot=bool(row["started_bot"]),
+        has_photo=has_photo,
+        has_username=bool(getattr(user, "username", None)),
+        is_premium=bool(getattr(user, "is_premium", False)),
+    )
+
+
+async def qualify_pending(group_id: int, inviter_id: int) -> QualifyReport:
+    if not qualification_enabled():
+        return QualifyReport()
+    settings = get_settings()
+    rows = list(await db.list_pending_adds(group_id, inviter_id, limit=_BATCH_LIMIT) or [])
+    if not rows:
+        return QualifyReport()
+
+    signals = await asyncio.gather(*(_collect(row, group_id) for row in rows))
+    qualified = rejected = 0
+    for row, s in zip(rows, signals):
+        if s is None:
+            continue
+        verdict = evaluate(s, settings.add_min_hours, settings.add_min_score)
+        try:
+            if verdict == "qualified" and await db.qualify_pending_add(int(row["id"])):
+                qualified += 1
+            elif verdict == "rejected":
+                await db.reject_pending_add(int(row["id"]))
+                rejected += 1
+        except Exception as e:
+            logger.error(f"Ошибка проверки добавленного {row['member_id']} (inviter={inviter_id}): {e}")
+
+    waiting = await db.count_pending_adds(group_id, inviter_id)
+    if qualified or rejected:
+        logger.info(
+            f"👥 Проверка добавленных inviter={inviter_id}: засчитано {qualified}, "
+            f"отклонено {rejected}, ждут {waiting}"
+        )
+    return QualifyReport(qualified=qualified, rejected=rejected, waiting=waiting)
