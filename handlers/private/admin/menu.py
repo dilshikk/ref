@@ -7,7 +7,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from loguru import logger
 from filters import private_only
-from keyboards.reply_keyboards import reply_keyboard_for_admin
+from keyboards.reply_keyboards import menu_kb, reply_keyboard_for_admin
 from filters.admin import IsBotAdminFilter
 from data.config import ADMINS
 
@@ -24,6 +24,16 @@ async def go_back_admin(message: types.Message, state: FSMContext):
 async def go_back_admin_alt(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("🔝 Главное меню", reply_markup=reply_keyboard_for_admin())
+
+
+@router.message(F.text == "👤 Меню пользователя", IsBotAdminFilter(ADMINS))
+async def open_user_menu(message: types.Message, state: FSMContext):
+    # #97: вместо «Назад», который никуда не вёл. Вернуться в админку — /admin
+    await state.clear()
+    await message.answer(
+        "👤 Меню пользователя. Вернуться в админ-панель — /admin",
+        reply_markup=menu_kb(),
+    )
 
 
 @router.message(Command("admin"), IsBotAdminFilter(ADMINS))

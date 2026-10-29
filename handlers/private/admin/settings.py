@@ -1,12 +1,12 @@
 # handlers/private/admin/settings.py
-"""⚙️ Настройки: ссылки и ID группы, участники для вывода, URL голосования."""
+"""⚙️ Настройки: ссылки и ID группы, участники для вывода, URL голосования.
+Заглушки «🔐 Безопасность» (дубль), «🌍 Локализация», «🤖 Поведение бота» удалены (#89, #91, #93)."""
 from typing import Any, cast
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
 from filters import private_only
 from keyboards.reply_keyboards import (
-    reply_keyboard_for_admin,
-    security_kb,
+    group_settings_kb,
     settings_kb,
 )
 from keyboards.inline_keyboards.actions import action_keyboard
@@ -21,35 +21,18 @@ from .common import cancel_kb, forms_router, record_setting_change
 router = private_only(Router(name="private.admin.settings"))
 
 # Числовые настройки показываем через get_settings() — те же значения, по которым
-# работает бот (#49). Раньше «Лимиты» показывали антифрод 100, а бот считал 20.
-# url_yaml остаётся для записи и для текстовых полей (ссылки, ID группы).
+# работает бот (#49). url_yaml остаётся для записи и для текстовых полей.
+# После сохранения возвращаем меню настроек группы, а не главное меню.
 
 
 @router.message(F.text == "⚙️ Настройки", IsBotAdminFilter(ADMINS))
 async def settings_menu(message: types.Message):
     await message.answer(
         "⚙️ <b>Настройки</b>\n\n"
-        "Здесь собраны меню-команды и базовые параметры бота.",
-        parse_mode="HTML",
-        reply_markup=settings_kb(),
-    )
-
-
-@router.message(F.text == "🔐 Безопасность", IsBotAdminFilter(ADMINS))
-async def settings_security_menu(message: types.Message):
-    await message.answer(
-        "🔐 <b>Безопасность</b>\n\n"
-        "Переход к антиспаму, банам и ограничениям.",
-        parse_mode="HTML",
-        reply_markup=security_kb(),
-    )
-
-
-@router.message(F.text == "🌍 Локализация", IsBotAdminFilter(ADMINS))
-async def settings_localization_menu(message: types.Message):
-    await message.answer(
-        "🌍 <b>Локализация</b>\n\n"
-        "Поддержка языков уже есть на уровне модели пользователя, но экран управления ещё можно расширить.",
+        "💰 Тарифы — суммы вывода и награды.\n"
+        "🎁 Реферальные настройки — награда и антифрод.\n"
+        "📊 Лимиты — текущие ограничения.\n"
+        "⚙️ Настройки каналов — группа и ссылка голосования.",
         parse_mode="HTML",
         reply_markup=settings_kb(),
     )
@@ -62,17 +45,9 @@ async def settings_limits_menu(message: types.Message):
         "📊 <b>Лимиты</b>\n\n"
         f"Антифрод: <b>{settings.antispam_referral_limit}</b> в час, "
         f"<b>{settings.antispam_referral_daily_limit}</b> в сутки\n"
-        f"Участников для вывода: <b>{settings.group_member_count}</b>",
-        parse_mode="HTML",
-        reply_markup=settings_kb(),
-    )
-
-
-@router.message(F.text == "🤖 Поведение бота", IsBotAdminFilter(ADMINS))
-async def settings_behavior_menu(message: types.Message):
-    await message.answer(
-        "🤖 <b>Поведение бота</b>\n\n"
-        "Сейчас маршруты разделены на private/group, а приватный доступ централизован фильтром.",
+        f"Участников для вывода: <b>{settings.group_member_count}</b>\n\n"
+        "Изменить антифрод — «🔒 Безопасность» → «🛡 Антиспам».\n"
+        "Изменить число участников — «⚙️ Настройки каналов».",
         parse_mode="HTML",
         reply_markup=settings_kb(),
     )
@@ -119,7 +94,7 @@ async def update_subcr_channel(message: types.Message, state: FSMContext):
     await record_setting_change(user.id, "subcr_channel", old_value, url_yaml["subcr_channel"])
     await message.answer(
         f"✅ Ссылка группы обновлена!\n🔗 <a href='{text}'>{text}</a>",
-        parse_mode="HTML", reply_markup=reply_keyboard_for_admin(),
+        parse_mode="HTML", reply_markup=group_settings_kb(),
     )
     await state.clear()
 
@@ -165,7 +140,7 @@ async def update_subcr_chat_id(message: types.Message, state: FSMContext):
     await record_setting_change(user.id, "subcr_chat_id", old_value, url_yaml["subcr_chat_id"])
     await message.answer(
         f"✅ ID группы обновлён: <code>{text}</code>",
-        parse_mode="HTML", reply_markup=reply_keyboard_for_admin(),
+        parse_mode="HTML", reply_markup=group_settings_kb(),
     )
     await state.clear()
 
@@ -208,7 +183,7 @@ async def update_group_member_count(message: types.Message, state: FSMContext):
     await record_setting_change(user.id, "group_member_count", old_value, url_yaml["group_member_count"])
     await message.answer(
         f"✅ Кол-во участников для вывода изменено на <b>{url_yaml['group_member_count']}</b>.",
-        parse_mode="HTML", reply_markup=reply_keyboard_for_admin(),
+        parse_mode="HTML", reply_markup=group_settings_kb(),
     )
     await state.clear()
 
@@ -217,7 +192,7 @@ async def update_group_member_count(message: types.Message, state: FSMContext):
 async def edit_url(message: types.Message):
     value = url_yaml.get("url", "не задан")
     await message.answer(
-        f"🌐 Текущий URL:\n<code>{value}</code>\n\nХотите изменить?",
+        f"🌐 Текущая ссылка голосования:\n<code>{value}</code>\n\nХотите изменить?",
         parse_mode="HTML",
         reply_markup=action_keyboard("url"),
     )
@@ -250,6 +225,6 @@ async def update_url(message: types.Message, state: FSMContext):
     await record_setting_change(user.id, "url", old_value, url_yaml["url"])
     await message.answer(
         f"✅ URL обновлён: <a href='{text}'>{text}</a>",
-        parse_mode="HTML", reply_markup=reply_keyboard_for_admin(),
+        parse_mode="HTML", reply_markup=group_settings_kb(),
     )
     await state.clear()

@@ -1,167 +1,137 @@
+"""Reply-клавиатуры админ-панели.
+
+На каждой кнопке — текст, на который есть обработчик (#65). Кнопки-заглушки
+и функции, которых нет в боте (подписки, пополнения, Premium, белый список,
+бан групп, владельцы каналов), убраны. one_time_keyboard не используется:
+иначе раздел сворачивался после первого нажатия (#98).
+"""
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
 
-def reply_keyboard_for_admin() -> ReplyKeyboardMarkup:
+def _kb(rows: list[list[str]]) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="💰 Финансы")],
-            [KeyboardButton(text="👥 Пользователи"), KeyboardButton(text="📢 Каналы и группы")],
-            [KeyboardButton(text="🤖 Бот"), KeyboardButton(text="📨 Рассылки")],
-            [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="🔒 Безопасность")],
-            [KeyboardButton(text="📋 Логи"), KeyboardButton(text="⬅️ Назад")],
-        ],
+        keyboard=[[KeyboardButton(text=text) for text in row] for row in rows],
         resize_keyboard=True,
     )
+
+
+def reply_keyboard_for_admin() -> ReplyKeyboardMarkup:
+    return _kb([
+        ["📊 Статистика", "💰 Финансы"],
+        ["👥 Пользователи", "📢 Каналы и группы"],
+        ["🤖 Бот", "📨 Рассылки"],
+        ["⚙️ Настройки", "🔒 Безопасность"],
+        # Раньше здесь был «⬅️ Назад», который никуда не вёл (#97)
+        ["📋 Логи", "👤 Меню пользователя"],
+    ])
 
 
 def stats_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="👥 Новые пользователи"), KeyboardButton(text="📈 Активность")],
-            [KeyboardButton(text="📢 Каналы"), KeyboardButton(text="💳 Финансы")],
-            [KeyboardButton(text="🎁 Реферальная статистика"), KeyboardButton(text="📅 Сегодня")],
-            [KeyboardButton(text="📆 Неделя"), KeyboardButton(text="🗓 Месяц")],
-            [KeyboardButton(text="🌍 За всё время"), KeyboardButton(text="⬅️ Назад")],
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
+    return _kb([
+        ["👥 Новые пользователи", "📈 Активность"],
+        ["📢 Каналы", "💳 Финансы"],
+        ["🎁 Реферальная статистика", "📅 Сегодня"],
+        ["📆 Неделя", "🗓 Месяц"],
+        ["🌍 За всё время", "⬅️ Назад"],
+    ])
 
 
 def finance_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="💳 Балансы"), KeyboardButton(text="⭐ Подписки")],
-            [KeyboardButton(text="💵 Пополнения"), KeyboardButton(text="🎁 Бонусы")],
-            [KeyboardButton(text="💸 Выплаты"), KeyboardButton(text="📊 Отчёты")],
-            [KeyboardButton(text="🆔 Чат выплат")],
-            [KeyboardButton(text="⚙️ Тарифы"), KeyboardButton(text="⬅️ Назад")],
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
+    return _kb([
+        # #66: обработчик слушает именно «💰 Заявки на выплаты»
+        # #101: /holds теперь доступен кнопкой
+        ["💰 Заявки на выплаты", "⏸ На удержании"],
+        # #67: тарифы открываются по «💰 Тарифы»
+        ["💰 Тарифы", "🆔 Чат выплат"],
+        ["⬅️ Назад"],
+    ])
 
 
 def users_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="🔍 Поиск пользователя"), KeyboardButton(text="📋 Все пользователи")],
-            [KeyboardButton(text="⭐ Premium"), KeyboardButton(text="🚫 Заблокированные пользователи")],
-            [KeyboardButton(text="👑 Администраторы"), KeyboardButton(text="🎁 Рефералы")],
-            [KeyboardButton(text="➕ Выдать подписку"), KeyboardButton(text="💰 Изменить баланс")],
-            [KeyboardButton(text="📨 Отправить сообщение"), KeyboardButton(text="⬅️ Назад")],
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
+    # Начислить баланс и написать пользователю — кнопками в его профиле (#76, #77)
+    return _kb([
+        ["🔍 Поиск пользователя", "📋 Все пользователи"],
+        ["🚫 Заблокированные пользователи", "👑 Администраторы"],
+        ["🎁 Рефералы", "⬅️ Назад"],
+    ])
 
 
 def channels_groups_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="📋 Все"), KeyboardButton(text="➕ Новые")],
-            [KeyboardButton(text="🔍 Поиск канала"), KeyboardButton(text="👑 Владельцы")],
-            [KeyboardButton(text="⚙️ Настройки каналов"), KeyboardButton(text="📈 Статистика")],
-            [KeyboardButton(text="🚫 Заблокированные каналы"), KeyboardButton(text="⬅️ Назад")],
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
+    return _kb([
+        # #79: меню обязательных подписок (добавить/удалить канал) теперь достижимо
+        ["📋 Все", "📌 Подписки"],
+        ["⚙️ Настройки каналов", "📈 Статистика"],
+        ["⬅️ Назад"],
+    ])
+
+
+def group_settings_kb() -> ReplyKeyboardMarkup:
+    """#82, #100: рабочие настройки группы и ссылки голосования, у которых не было кнопок."""
+    return _kb([
+        ["🔗 Ссылка группы", "🆔 ID группы"],
+        ["👤 Участников для вывода", "✏️ Изменить ссылку (URL)"],
+        ["⬅️ Назад"],
+    ])
 
 
 def bot_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="🏠 Главное меню"), KeyboardButton(text="📝 Тексты")],
-            [KeyboardButton(text="🌍 Языки"), KeyboardButton(text="🎁 Реферальная система")],
-            [KeyboardButton(text="📢 Уведомления"), KeyboardButton(text="⚙️ Конфиг бота")],
-            [KeyboardButton(text="🗳 Опросы")],
-            [KeyboardButton(text="⬅️ Назад")],
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
+    return _kb([
+        ["📝 Тексты", "🗳 Опросы"],
+        # #85, #86: тексты кнопок совпадают с обработчиками
+        ["🎁 Реферальные настройки", "⚙ Меню бота"],
+        ["⬅️ Назад"],
+    ])
 
 
 def broadcasts_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="➕ Новая"), KeyboardButton(text="📋 История")],
-            [KeyboardButton(text="⏳ Запланированные"), KeyboardButton(text="📊 Статистика рассылок")],
-            [KeyboardButton(text="⬅️ Назад")],
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
+    return _kb([
+        ["➕ Новая", "📋 История"],
+        ["⏳ Запланированные", "📊 Статистика рассылок"],
+        ["⬅️ Назад"],
+    ])
 
 
 def settings_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="🔐 Безопасность"), KeyboardButton(text="🌍 Локализация")],
-            [KeyboardButton(text="💰 Тарифы"), KeyboardButton(text="🎁 Реферальные настройки")],
-            [KeyboardButton(text="📊 Лимиты"), KeyboardButton(text="🤖 Поведение бота")],
-            [KeyboardButton(text="⬅️ Назад")],
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
+    return _kb([
+        ["💰 Тарифы", "🎁 Реферальные настройки"],
+        ["📊 Лимиты", "⚙️ Настройки каналов"],
+        ["⬅️ Назад"],
+    ])
 
 
 def tariffs_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="💸 Мин. сумма вывода"), KeyboardButton(text="💰 Макс. сумма вывода")],
-            [KeyboardButton(text="🎁 Сумма за приглашение"), KeyboardButton(text="🗳 Сумма за голос")],
-            [KeyboardButton(text="⬅️ Назад")],
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
+    return _kb([
+        ["💸 Мин. сумма вывода", "💰 Макс. сумма вывода"],
+        ["🎁 Сумма за приглашение", "🗳 Сумма за голос"],
+        ["⬅️ Назад"],
+    ])
 
 
 def security_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="🚫 Бан пользователей"), KeyboardButton(text="🚫 Бан групп")],
-            [KeyboardButton(text="🛡 Антиспам"), KeyboardButton(text="📱 Ограничения")],
-            [KeyboardButton(text="📋 Белый список"), KeyboardButton(text="⬅️ Назад")],
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
+    return _kb([
+        ["🚫 Бан пользователей", "🛡 Антиспам"],
+        ["⬅️ Назад"],
+    ])
 
 
 def logs_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="👥 Пользовательские"), KeyboardButton(text="💰 Финансовые")],
-            [KeyboardButton(text="📢 Группы"), KeyboardButton(text="🤖 События бота")],
-            [KeyboardButton(text="⚙️ Изменения"), KeyboardButton(text="❌ Ошибки")],
-            [KeyboardButton(text="⬅️ Назад")],
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
+    return _kb([
+        ["👥 Пользовательские", "💰 Финансовые"],
+        ["📢 Группы", "🤖 События бота"],
+        ["⚙️ Изменения", "❌ Ошибки"],
+        ["⬅️ Назад"],
+    ])
 
 
 def bot_menu_settings_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="👥 Команды пользователей"), KeyboardButton(text="🛡 Команды админов")],
-            [KeyboardButton(text="🔄 Обновить меню"), KeyboardButton(text="🔙 Назад")],
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
+    return _kb([
+        ["👥 Команды пользователей", "🛡 Команды админов"],
+        ["🔄 Обновить меню", "🔙 Назад"],
+    ])
 
 
 def subscription_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="➕ Добавить канал"), KeyboardButton(text="➖ Удалить канал")],
-            [KeyboardButton(text="👁‍🗨 Посмотреть каналы"), KeyboardButton(text="⬅️ Назад")],
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
+    return _kb([
+        ["➕ Добавить канал", "➖ Удалить канал"],
+        ["👁‍🗨 Посмотреть каналы", "⬅️ Назад"],
+    ])
