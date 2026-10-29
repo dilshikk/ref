@@ -1,0 +1,33 @@
+# handlers/private/admin/__init__.py
+"""
+Админ-панель (#37). Раньше всё жило в одном handlers/private/admin_panel.py (110 КБ).
+
+Порядок важен:
+- разделы подключаются по кнопкам меню; тексты кнопок у разделов не пересекаются;
+- forms_router (ввод значений в формах AdminFlow.*) — ПОСЛЕДНИМ: кнопка меню
+  посреди формы открывает свой раздел, а не уходит в форму как значение.
+
+Снаружи пакет подключается в handlers/__init__.py на прежнее место admin_panel:
+после payout_guard, referral_holds и broadcasts (они перехватывают свои кнопки раньше).
+"""
+from aiogram import Router
+
+from . import bot, broadcasts, channels, finance, logs, menu, security, settings, stats, users
+from .common import forms_router
+
+router = Router(name="private.admin")
+router.include_routers(
+    menu.router,
+    stats.router,
+    finance.router,
+    users.router,
+    channels.router,
+    bot.router,
+    broadcasts.router,
+    settings.router,
+    security.router,
+    logs.router,
+    forms_router,
+)
+
+__all__ = ["router"]
