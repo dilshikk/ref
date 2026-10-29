@@ -2,7 +2,7 @@
 aiogram==3.31.0
 
 # Database
-SQLAlchemy==2.1.6
+SQLAlchemy[asyncio]==2.1.6
 asyncpg==0.32.0
 
 # Config and logging
