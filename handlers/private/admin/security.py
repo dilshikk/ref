@@ -16,7 +16,7 @@ from data.config import ADMINS, url_yaml
 from data.settings import get_settings
 from utils.yaml_io import save_url_yaml
 
-from .common import cancel_kb, forms_router, get_user_totals, record_setting_change
+from .common import blocked_users_text, cancel_kb, forms_router, record_setting_change
 
 router = private_only(Router(name="private.admin.security"))
 
@@ -36,11 +36,10 @@ async def security_menu(message: types.Message):
 
 @router.message(F.text == "🚫 Бан пользователей", IsBotAdminFilter(ADMINS))
 async def security_ban_users(message: types.Message):
-    users = await get_user_totals()
+    # #78: тот же список, что в «👥 Пользователи», плюс подсказка, как заблокировать
     await message.answer(
-        "🚫 <b>Бан пользователей</b>\n\n"
-        f"Заблокировано: <b>{users['blocked_users']}</b>\n\n"
-        "Чтобы заблокировать, откройте пользователя через «🔍 Поиск пользователя» "
+        await blocked_users_text()
+        + "\n\nЧтобы заблокировать, откройте пользователя через «🔍 Поиск пользователя» "
         "в разделе «👥 Пользователи».",
         parse_mode="HTML",
         reply_markup=security_kb(),

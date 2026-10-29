@@ -1,6 +1,10 @@
 # handlers/private/admin/finance.py
 """💰 Финансы и тарифы: суммы вывода, награды, чат отчётов о выплатах.
-Сами выплаты (одобрение/отклонение) — в handlers/private/payout_guard.py."""
+Сами выплаты (одобрение/отклонение) — в handlers/private/payout_guard.py.
+
+Тарифы меняются только в инлайн-панели «💰 Тарифы» (#99). Старые обработчики
+«💸 Мин. сумма вывода», «💰 Макс. сумма вывода», «🎁 Сумма за приглашение»,
+«🗳 Сумма за голос» удалены: их кнопки (tariffs_kb) нигде не показывались."""
 from typing import Any, cast
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
@@ -8,7 +12,6 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from filters import private_only
 from keyboards.reply_keyboards import (
     finance_kb,
-    reply_keyboard_for_admin,
     settings_kb,
 )
 from keyboards.inline_keyboards.actions import action_keyboard
@@ -86,13 +89,14 @@ async def _render_tariffs_panel(message: types.Message) -> None:
 
 @router.message(F.text == "💰 Финансы", IsBotAdminFilter(ADMINS))
 async def finance_menu(message: types.Message):
-    payouts = await get_finance_totals()
+    totals = await get_finance_totals()
     payment_target = payment_report_target()
     payment_target_text = str(payment_target) if payment_target is not None else "не задан"
     await message.answer(
         "💰 <b>Финансы</b>\n\n"
-        f"💸 Ожидают выплат: <b>{payouts['pending_payouts']}</b>\n"
-        f"⭐ Условных единиц баланса: <b>{payouts['balance_units']}</b>\n"
+        f"💸 Ожидают выплат: <b>{totals['pending_payouts']}</b> на <b>{totals['pending_sum']}</b> сум\n"
+        # #84: раньше здесь было число приглашённых под видом «единиц баланса»
+        f"💵 На балансах пользователей: <b>{totals['balance_sum']}</b> сум\n"
         f"🆔 Чат отчётов выплат: <code>{payment_target_text}</code>\n\n"
         "Здесь собраны денежные настройки и отчёты.",
         parse_mode="HTML",
@@ -199,175 +203,6 @@ async def tariff_inline_value_input(message: types.Message, state: FSMContext):
     await message.answer(
         f"✅ {field['icon']} {field['label']} обновлен: <b>{value}</b>",
         parse_mode="HTML",
-    )
-    await state.clear()
-
-
-@router.message(F.text == "💸 Мин. сумма вывода", IsBotAdminFilter(ADMINS))
-async def edit_min_balance(message: types.Message):
-    value = _current("min_balance")
-    await message.answer(
-        f"💸 Текущая минимальная сумма вывода: <b>{value}</b> сум.\nХотите изменить?",
-        parse_mode="HTML",
-        reply_markup=action_keyboard("min_balance"),
-    )
-
-
-@router.callback_query(F.data == "yes_min_balance", IsBotAdminFilter(ADMINS))
-async def confirm_min_edit(call: types.CallbackQuery, state: FSMContext):
-    msg = call.message
-    if msg is None:
-        return
-    await cast(Any, msg).answer(
-        f"Введите новую минимальную сумму.\nСейчас: {_current('min_balance')}",
-        reply_markup=cancel_kb,
-    )
-    await state.set_state(AdminFlow.set_min_balance)
-
-
-@forms_router.message(AdminFlow.set_min_balance, IsBotAdminFilter(ADMINS))
-async def update_min_balance(message: types.Message, state: FSMContext):
-    user = message.from_user
-    if user is None:
-        return
-    text = (message.text or "").strip()
-    if not text.isdigit():
-        await message.answer("❌ Введите только число!\nПример: <code>10000</code>", parse_mode="HTML")
-        return
-    old_value = url_yaml.get("min_balance")
-    url_yaml["min_balance"] = int(text)
-    save_url_yaml()
-    await record_setting_change(user.id, "min_balance", old_value, url_yaml["min_balance"])
-    await message.answer(
-        f"✅ Минимальная сумма вывода изменена на <b>{url_yaml['min_balance']}</b> сум.",
-        parse_mode="HTML", reply_markup=reply_keyboard_for_admin(),
-    )
-    await state.clear()
-
-
-@router.message(F.text == "💰 Макс. сумма вывода", IsBotAdminFilter(ADMINS))
-async def edit_max_withdraw(message: types.Message):
-    value = _current("max_withdraw")
-    await message.answer(
-        f"💰 Текущая максимальная сумма вывода: <b>{value}</b> сум.\n\nХотите изменить?",
-        parse_mode="HTML",
-        reply_markup=action_keyboard("max_withdraw"),
-    )
-
-
-@router.callback_query(F.data == "yes_max_withdraw", IsBotAdminFilter(ADMINS))
-async def confirm_max_withdraw(call: types.CallbackQuery, state: FSMContext):
-    msg = call.message
-    if msg is None:
-        return
-    await cast(Any, msg).answer(
-        f"Введите новую максимальную сумму.\nСейчас: {_current('max_withdraw')}\n"
-        "Пример: <code>500000</code>",
-        parse_mode="HTML", reply_markup=cancel_kb,
-    )
-    await state.set_state(AdminFlow.set_max_withdraw)
-
-
-@forms_router.message(AdminFlow.set_max_withdraw, IsBotAdminFilter(ADMINS))
-async def update_max_withdraw(message: types.Message, state: FSMContext):
-    user = message.from_user
-    if user is None:
-        return
-    text = (message.text or "").strip()
-    if not text.isdigit() or int(text) <= 0:
-        await message.answer("❌ Введите целое положительное число!\nПример: <code>500000</code>", parse_mode="HTML")
-        return
-    old_value = url_yaml.get("max_withdraw")
-    url_yaml["max_withdraw"] = int(text)
-    save_url_yaml()
-    await record_setting_change(user.id, "max_withdraw", old_value, url_yaml["max_withdraw"])
-    await message.answer(
-        f"✅ Максимальная сумма вывода изменена на <b>{url_yaml['max_withdraw']}</b> сум.",
-        parse_mode="HTML", reply_markup=reply_keyboard_for_admin(),
-    )
-    await state.clear()
-
-
-@router.message(F.text == "🎁 Сумма за приглашение", IsBotAdminFilter(ADMINS))
-async def edit_invite_reward(message: types.Message):
-    value = _current("invited_credit")
-    await message.answer(
-        f"👥 Текущая сумма за приглашённого: <b>{value}</b> сум.\nХотите изменить?",
-        parse_mode="HTML",
-        reply_markup=action_keyboard("invite_reward"),
-    )
-
-
-@router.callback_query(F.data == "yes_invite_reward", IsBotAdminFilter(ADMINS))
-async def confirm_invite_edit(call: types.CallbackQuery, state: FSMContext):
-    msg = call.message
-    if msg is None:
-        return
-    await cast(Any, msg).answer(
-        f"Введите новую сумму за приглашение.\nСейчас: {_current('invited_credit')}",
-        reply_markup=cancel_kb,
-    )
-    await state.set_state(AdminFlow.set_invite_reward)
-
-
-@forms_router.message(AdminFlow.set_invite_reward, IsBotAdminFilter(ADMINS))
-async def update_invite_reward(message: types.Message, state: FSMContext):
-    user = message.from_user
-    if user is None:
-        return
-    text = (message.text or "").strip()
-    if not text.isdigit():
-        await message.answer("❌ Введите только число!\nПример: <code>5000</code>", parse_mode="HTML")
-        return
-    old_value = url_yaml.get("invited_credit")
-    url_yaml["invited_credit"] = int(text)
-    save_url_yaml()
-    await record_setting_change(user.id, "invited_credit", old_value, url_yaml["invited_credit"])
-    await message.answer(
-        f"✅ Сумма за приглашение изменена на <b>{url_yaml['invited_credit']}</b> сум.",
-        parse_mode="HTML", reply_markup=reply_keyboard_for_admin(),
-    )
-    await state.clear()
-
-
-@router.message(F.text == "🗳 Сумма за голос", IsBotAdminFilter(ADMINS))
-async def edit_vote_price(message: types.Message):
-    value = _current("vote_credit")
-    await message.answer(
-        f"🗳 Текущая сумма за голос: <b>{value}</b> сум.\nХотите изменить?",
-        parse_mode="HTML",
-        reply_markup=action_keyboard("vote_reward"),
-    )
-
-
-@router.callback_query(F.data == "yes_vote_reward", IsBotAdminFilter(ADMINS))
-async def confirm_vote_price(call: types.CallbackQuery, state: FSMContext):
-    msg = call.message
-    if msg is None:
-        return
-    await cast(Any, msg).answer(
-        f"Введите новую сумму за голос.\nСейчас: {_current('vote_credit')}",
-        reply_markup=cancel_kb,
-    )
-    await state.set_state(AdminFlow.set_vote_reward)
-
-
-@forms_router.message(AdminFlow.set_vote_reward, IsBotAdminFilter(ADMINS))
-async def update_vote_reward(message: types.Message, state: FSMContext):
-    user = message.from_user
-    if user is None:
-        return
-    text = (message.text or "").strip()
-    if not text.isdigit():
-        await message.answer("❌ Введите только число!\nПример: <code>200</code>", parse_mode="HTML")
-        return
-    old_value = url_yaml.get("vote_credit")
-    url_yaml["vote_credit"] = int(text)
-    save_url_yaml()
-    await record_setting_change(user.id, "vote_credit", old_value, url_yaml["vote_credit"])
-    await message.answer(
-        f"✅ Сумма за голос изменена на <b>{url_yaml['vote_credit']}</b> сум.",
-        parse_mode="HTML", reply_markup=reply_keyboard_for_admin(),
     )
     await state.clear()
 

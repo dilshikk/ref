@@ -4,8 +4,9 @@
 запись изменений настроек в аудит.
 Настройки сохраняются через utils.yaml_io.save_url_yaml (атомарная запись, #17).
 """
+import html
 from typing import Any, cast
-from aiogram import Router, types
+from aiogram import Router
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from filters import private_only
 from loader import db
@@ -24,12 +25,20 @@ cancel_kb = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
+BLOCKED_LIST_LIMIT = 30
+
+
+def _int(row: dict[str, Any] | None, key: str) -> int:
+    return int((row or {}).get(key) or 0)
+
 
 async def get_user_totals() -> dict[str, int]:
-    users = cast(list[dict[str, Any]], await db.select_all_users() or [])
-    total_users = len(users)
-    blocked_users = sum(1 for user in users if user.get("is_blocked"))
-    return {"total_users": total_users, "blocked_users": blocked_users}
+    # Раньше грузились ВСЕ пользователи ради двух чисел
+    row = cast(dict[str, Any] | None, await db.execute(
+        "SELECT COUNT(*) AS total_users, COUNT(*) FILTER (WHERE is_blocked) AS blocked_users FROM Users",
+        fetchone=True,
+    ))
+    return {"total_users": _int(row, "total_users"), "blocked_users": _int(row, "blocked_users")}
 
 
 async def get_referral_totals() -> dict[str, int]:
@@ -38,8 +47,8 @@ async def get_referral_totals() -> dict[str, int]:
         fetchone=True,
     ))
     return {
-        "total_referrals": int(referrals["total_referrals"] or 0) if referrals else 0,
-        "current_referrals": int(referrals["current_referrals"] or 0) if referrals else 0,
+        "total_referrals": _int(referrals, "total_referrals"),
+        "current_referrals": _int(referrals, "current_referrals"),
     }
 
 
@@ -49,17 +58,78 @@ async def get_channel_totals() -> dict[str, int]:
 
 
 async def get_finance_totals() -> dict[str, int]:
-    payouts = cast(list[dict[str, Any]], await db.get_pending_payouts() or [])
-    counts = cast(dict[str, Any] | None, await db.execute(
-        "SELECT COALESCE(SUM(current_count), 0) AS balance_units FROM UserInviteCount",
+    """
+    Деньги в сумах (#84). Раньше «финансы» считали SUM(current_count) —
+    это число приглашённых, а не деньги. Баланс хранится в balance_sum / earned_sum.
+    """
+    payouts = cast(dict[str, Any] | None, await db.execute(
+        """
+        SELECT
+            COUNT(*) FILTER (WHERE status = 'pending') AS pending_payouts,
+            COALESCE(SUM(amount) FILTER (WHERE status = 'pending'), 0) AS pending_sum,
+            COUNT(*) FILTER (WHERE status = 'approved') AS approved_payouts,
+            COALESCE(SUM(amount) FILTER (WHERE status = 'approved'), 0) AS approved_sum,
+            COALESCE(SUM(amount) FILTER (
+                WHERE status = 'approved' AND created_at >= NOW() - INTERVAL '30 days'
+            ), 0) AS approved_30d_sum
+        FROM PayoutRequests
+        """,
         fetchone=True,
     ))
-    balance_units = int(counts["balance_units"] or 0) if counts else 0
-    return {"pending_payouts": len(payouts), "balance_units": balance_units}
+    balances = cast(dict[str, Any] | None, await db.execute(
+        """
+        SELECT
+            COALESCE(SUM(GREATEST(balance_sum, 0)), 0) AS balance_sum,
+            COALESCE(-SUM(LEAST(balance_sum, 0)), 0) AS debt_sum,
+            COALESCE(SUM(earned_sum), 0) AS earned_sum
+        FROM UserInviteCount
+        """,
+        fetchone=True,
+    ))
+    return {
+        "pending_payouts": _int(payouts, "pending_payouts"),
+        "pending_sum": _int(payouts, "pending_sum"),
+        "approved_payouts": _int(payouts, "approved_payouts"),
+        "approved_sum": _int(payouts, "approved_sum"),
+        "approved_30d_sum": _int(payouts, "approved_30d_sum"),
+        "balance_sum": _int(balances, "balance_sum"),
+        "debt_sum": _int(balances, "debt_sum"),
+        "earned_sum": _int(balances, "earned_sum"),
+    }
 
 
-async def show_placeholder(message: types.Message, title: str, body: str, keyboard: ReplyKeyboardMarkup) -> None:
-    await message.answer(f"<b>{title}</b>\n\n{body}", parse_mode="HTML", reply_markup=keyboard)
+async def blocked_users_text() -> str:
+    """Список заблокированных с переходом в профиль (#78). Раньше было только число."""
+    title = "🚫 <b>Заблокированные пользователи</b>\n\n"
+    total = (await get_user_totals())["blocked_users"]
+    if total == 0:
+        return title + "Сейчас заблокированных пользователей нет."
+
+    rows = cast(list[dict[str, Any]], await db.execute(
+        """
+        SELECT telegram_id, full_name, username
+        FROM Users
+        WHERE is_blocked
+        ORDER BY created_at DESC
+        LIMIT $1
+        """,
+        parameters=(BLOCKED_LIST_LIMIT,),
+        fetchall=True,
+    ) or [])
+    lines = []
+    for row in rows:
+        name = html.escape(row.get("full_name") or "—")
+        username = f"@{html.escape(row['username'])}" if row.get("username") else "—"
+        lines.append(f"• {name} ({username}) — /uid{row['telegram_id']}")
+    more = total - len(rows)
+    tail = f"\n…и ещё <b>{more}</b>" if more > 0 else ""
+    return (
+        title
+        + f"Всего: <b>{total}</b>\n\n"
+        + "\n".join(lines)
+        + tail
+        + "\n\nНажмите /uid рядом с именем, чтобы открыть профиль и разблокировать."
+    )
 
 
 async def record_setting_change(actor_id: int, setting_name: str, old_value, new_value) -> None:
