@@ -16,6 +16,8 @@
   из группы). Проверка идёт в том же SQL, что и списание, — атомарно.
 - одобрять/отклонять выплаты может только MONEY_ADMINS (#23); остальным админам
   отвечает money_guard.
+- отчёт о выплате отправляется через services/payouts.py, а не через
+  внутренние функции admin_panel (#36).
 - список «💰 Заявки на выплаты» перехватывается здесь: полный номер карты видит
   только MONEY_ADMINS, остальные админы — маску ****1234 (#20).
 """
@@ -32,8 +34,8 @@ from filters import private_only
 from filters.admin import IsAdminWithoutMoneyRights, IsBotAdminFilter, IsMoneyAdmin
 from keyboards.reply_keyboards import finance_kb
 from loader import db
+from services.payouts import send_payout_report
 from states.flows import AdminFlow
-from handlers.private.admin_panel import _send_payout_report
 from utils import payment_details
 from utils.payout_math import credits_for_amount
 
@@ -291,7 +293,7 @@ async def payout_finalize_with_receipt(message: types.Message, state: FSMContext
 
     report_sent = False
     try:
-        report_sent = await _send_payout_report(message, payout_row, admin_id=admin_id, include_receipt=include_receipt)
+        report_sent = await send_payout_report(message, payout_row, admin_id=admin_id, include_receipt=include_receipt)
     except Exception as e:
         logger.warning(f"Не удалось отправить отчет о выплате в группу: {e}")
 
