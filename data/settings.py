@@ -24,8 +24,16 @@ DEFAULT_MIN_BALANCE = 0
 # Фактически «без ограничения», пока админ не задал лимит
 DEFAULT_MAX_WITHDRAW = 9_999_999
 DEFAULT_GROUP_MEMBER_COUNT = 3
-DEFAULT_ANTISPAM_REFERRAL_LIMIT = 100
+# Антифрод (#18): было 100 в час. Вступления сверх лимита не теряются, а ждут
+# решения админа (/holds), поэтому лимит можно держать низким.
+DEFAULT_ANTISPAM_REFERRAL_LIMIT = 20
+DEFAULT_ANTISPAM_REFERRAL_DAILY_LIMIT = 100
 DEFAULT_REFERRAL_HOLD_HOURS = 72
+# Добавленный в группу засчитывается в «добавил N участников» только после того,
+# как пробыл в группе add_min_hours и набрал add_min_score (см. utils/account_quality.py).
+# 0 и 0 — проверка выключена (как до #18).
+DEFAULT_ADD_MIN_HOURS = 24
+DEFAULT_ADD_MIN_SCORE = 2
 DEFAULT_POLL_QUESTION = "Насколько вам удобен наш бот?"
 DEFAULT_POLL_OPTIONS: tuple[str, ...] = ("Отлично", "Нормально", "Нужно улучшить")
 _MAX_POLL_OPTIONS = 10  # ограничение Telegram
@@ -39,7 +47,10 @@ class Settings:
     max_withdraw: int            # максимальная сумма одного вывода
     group_member_count: int      # сколько участников нужно добавить перед выводом
     antispam_referral_limit: int # максимум оплачиваемых рефералов в час
+    antispam_referral_daily_limit: int  # максимум оплачиваемых рефералов за 24 часа
     referral_hold_hours: int     # выход из группы в течение стольких часов снимает начисление (0 — всегда)
+    add_min_hours: int           # сколько часов добавленный должен пробыть в группе до зачёта
+    add_min_score: int           # минимальный балл активности добавленного
     group_link: str              # ссылка на группу (subcr_channel)
     payment_channel: str         # публичная ссылка на чат выплат
     vote_url: str                # ссылка «Проголосовать» (url)
@@ -93,7 +104,12 @@ def get_settings() -> Settings:
         max_withdraw=_int("max_withdraw", DEFAULT_MAX_WITHDRAW, minimum=1),
         group_member_count=_int("group_member_count", DEFAULT_GROUP_MEMBER_COUNT),
         antispam_referral_limit=_int("antispam_referral_limit", DEFAULT_ANTISPAM_REFERRAL_LIMIT, minimum=1),
+        antispam_referral_daily_limit=_int(
+            "antispam_referral_daily_limit", DEFAULT_ANTISPAM_REFERRAL_DAILY_LIMIT, minimum=1
+        ),
         referral_hold_hours=_int("referral_hold_hours", DEFAULT_REFERRAL_HOLD_HOURS),
+        add_min_hours=_int("add_min_hours", DEFAULT_ADD_MIN_HOURS),
+        add_min_score=_int("add_min_score", DEFAULT_ADD_MIN_SCORE),
         group_link=_str("subcr_channel"),
         payment_channel=_str("payment_channel"),
         vote_url=_str("url"),
