@@ -1,6 +1,7 @@
 # handlers/private/admin/users.py
 """👥 Пользователи: списки, заблокированные, администраторы, рефералы.
 Поиск и изменение баланса — в handlers/private/user_management.py."""
+import html
 from typing import Any, cast
 from aiogram import Router, types, F
 from filters import private_only
@@ -58,7 +59,7 @@ async def referrals_menu(message: types.Message):
         await message.answer("🎁 Рефералов пока нет.", reply_markup=users_kb())
         return
     lines = [
-        f"{index}. <b>{row['full_name']}</b> — <b>{row['history_count']}</b>"
+        f"{index}. <b>{html.escape(row['full_name'] or '—')}</b> — <b>{row['history_count']}</b>"
         for index, row in enumerate(top_referrals, start=1)
     ]
     await message.answer(
