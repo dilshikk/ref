@@ -13,11 +13,16 @@ from keyboards.inline_keyboards.actions import action_keyboard
 from states.flows import AdminFlow
 from filters.admin import IsBotAdminFilter
 from data.config import ADMINS, url_yaml
+from data.settings import get_settings
 from utils.yaml_io import save_url_yaml
 
 from .common import cancel_kb, forms_router, record_setting_change
 
 router = private_only(Router(name="private.admin.settings"))
+
+# Числовые настройки показываем через get_settings() — те же значения, по которым
+# работает бот (#49). Раньше «Лимиты» показывали антифрод 100, а бот считал 20.
+# url_yaml остаётся для записи и для текстовых полей (ссылки, ID группы).
 
 
 @router.message(F.text == "⚙️ Настройки", IsBotAdminFilter(ADMINS))
@@ -52,10 +57,12 @@ async def settings_localization_menu(message: types.Message):
 
 @router.message(F.text == "📊 Лимиты", IsBotAdminFilter(ADMINS))
 async def settings_limits_menu(message: types.Message):
+    settings = get_settings()
     await message.answer(
         "📊 <b>Лимиты</b>\n\n"
-        f"Антифрод: <b>{url_yaml.get('antispam_referral_limit', 100)}</b>\n"
-        f"Участников для вывода: <b>{url_yaml.get('group_member_count', 3)}</b>",
+        f"Антифрод: <b>{settings.antispam_referral_limit}</b> в час, "
+        f"<b>{settings.antispam_referral_daily_limit}</b> в сутки\n"
+        f"Участников для вывода: <b>{settings.group_member_count}</b>",
         parse_mode="HTML",
         reply_markup=settings_kb(),
     )
@@ -165,7 +172,7 @@ async def update_subcr_chat_id(message: types.Message, state: FSMContext):
 
 @router.message(F.text == "👤 Участников для вывода", IsBotAdminFilter(ADMINS))
 async def edit_group_member_count(message: types.Message):
-    value = url_yaml.get("group_member_count", 3)
+    value = get_settings().group_member_count
     await message.answer(
         f"👥 Текущее кол-во участников для вывода: <b>{value}</b>\n\nХотите изменить?",
         parse_mode="HTML",
@@ -179,7 +186,7 @@ async def confirm_group_member_count(call: types.CallbackQuery, state: FSMContex
     if msg is None:
         return
     await cast(Any, msg).answer(
-        f"Введите новое кол-во участников.\nСейчас: {url_yaml.get('group_member_count', 3)}\n"
+        f"Введите новое кол-во участников.\nСейчас: {get_settings().group_member_count}\n"
         "Пример: <code>5</code>",
         parse_mode="HTML", reply_markup=cancel_kb,
     )
@@ -195,7 +202,7 @@ async def update_group_member_count(message: types.Message, state: FSMContext):
     if not text.isdigit() or int(text) <= 0:
         await message.answer("❌ Введите целое положительное число!\nПример: <code>5</code>", parse_mode="HTML")
         return
-    old_value = url_yaml.get("group_member_count", 3)
+    old_value = url_yaml.get("group_member_count")
     url_yaml["group_member_count"] = int(text)
     save_url_yaml()
     await record_setting_change(user.id, "group_member_count", old_value, url_yaml["group_member_count"])

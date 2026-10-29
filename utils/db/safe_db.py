@@ -3,19 +3,19 @@
 
 - execute() теперь ВСЕГДА делает commit: раньше запросы с fetchone/fetchall
   (в т.ч. INSERT/UPDATE ... RETURNING — отложенные рассылки) откатывались.
-- Атомарные операции с заявками на выплату (защита от двойной обработки)
-  и списание только выплаченной суммы вместо обнуления баланса.
+- Атомарное отклонение заявок на выплату (защита от двойной обработки).
+  Одобрение — только в ReferralDatabase (utils/db/referral_db.py): там баланс
+  проверяется в том же SQL, что и списание (#49).
 - Проверка блокировки пользователя.
 - Атомарное начисление за реферала (защита от двойного начисления).
 - Баланс хранится в ДЕНЬГАХ (balance_sum / earned_sum), а не считается как
   «количество × текущая цена». Смена цены за реферала больше не пересчитывает
   уже заработанные деньги. current_count/history_count остаются как счётчики людей.
 - Если приглашённый вышел из группы — начисление за него снимается (пункт 8).
-- При одобрении выплаты из счётчика «добавил N участников» списывается норма,
-  поэтому одни и те же добавленные не открывают вывод повторно (пункт 11).
 - Награда за голос (vote_credit) начисляется один раз на вопрос (пункт 14).
 - Ручное добавление в группу засчитывается один раз на человека, а при выходе
   добавленного (в срок удержания) снимается — накрутка удалением/добавлением не работает.
+- Цена за приглашённого читается через get_settings(), как во всём боте (#49).
 """
 from __future__ import annotations
 
@@ -24,15 +24,13 @@ from typing import Any, cast
 from loguru import logger
 from sqlalchemy import text
 
-from data.config import url_yaml
+from data.settings import get_settings
 from utils.db.postgres import Database
 
 
 def _current_price() -> int:
-    try:
-        return max(0, int(url_yaml.get("invited_credit", 0) or 0))
-    except (TypeError, ValueError):
-        return 0
+    """Текущая цена за приглашённого: get_settings() уже даёт целое число >= 0 (#22, #49)."""
+    return get_settings().invited_credit
 
 
 class SafeDatabase(Database):
@@ -135,9 +133,13 @@ class SafeDatabase(Database):
             fetchall=True,
         )
 
-    async def add_balance(self, user_id: int, amount: int, price: int | None = None) -> None:
-        """Бонус от админа: amount приглашений по цене на момент начисления."""
-        money = amount * (_current_price() if price is None else price)
+    async def add_balance(self, user_id: int, amount: int, *, price: int) -> None:
+        """
+        Бонус от админа: amount приглашений по цене price.
+        price обязателен (#49): вызывающий берёт его из get_settings() в момент
+        начисления и показывает админу ту же сумму, что реально начислится.
+        """
+        money = amount * max(0, int(price))
         await self.execute(
             """
             INSERT INTO UserInviteCount (user_id, current_count, history_count, balance_sum, earned_sum)
@@ -173,48 +175,9 @@ class SafeDatabase(Database):
             fetchone=True,
         )
 
-    async def approve_payout_if_pending(
-        self,
-        request_id: int,
-        credits_to_deduct: int,
-        group_id: int | None = None,
-        members_to_deduct: int = 0,
-    ):
-        """
-        В одной транзакции: pending → approved, списание ровно выплаченной суммы
-        (деньги — из balance_sum, счётчик людей — на credits_to_deduct) и
-        списание members_to_deduct из счётчика «добавил N участников» в группе
-        group_id — чтобы одних и тех же добавленных нельзя было использовать
-        для следующего вывода. Лишние добавленные сверх нормы сохраняются.
-        Возвращает строку или None, если заявка уже обработана.
-        """
-        return await self.execute(
-            """
-            WITH upd AS (
-                UPDATE PayoutRequests SET status = 'approved'
-                WHERE id = $1 AND status = 'pending'
-                RETURNING id, user_id, amount
-            ), ded AS (
-                UPDATE UserInviteCount uic
-                SET current_count = GREATEST(0, uic.current_count - $2),
-                    balance_sum   = GREATEST(0, uic.balance_sum - CAST(CEIL(upd.amount) AS BIGINT))
-                FROM upd
-                WHERE uic.user_id = upd.user_id
-                RETURNING uic.user_id
-            ), grp AS (
-                UPDATE GroupMembers gm
-                SET add_user_count = GREATEST(0, gm.add_user_count - $4)
-                FROM upd
-                WHERE gm.user_id = upd.user_id
-                  AND gm.group_id = CAST($3 AS BIGINT)
-                  AND $4 > 0
-                RETURNING gm.user_id
-            )
-            SELECT id, user_id, amount FROM upd
-            """,
-            parameters=(request_id, credits_to_deduct, group_id, max(0, int(members_to_deduct))),
-            fetchone=True,
-        )
+    # approve_payout_if_pending здесь больше нет (#49). Старая версия не проверяла
+    # баланс и списывала через GREATEST(0, …): работала правильная только потому,
+    # что ReferralDatabase её переопределял. Единственная версия — в referral_db.py.
 
     async def is_user_blocked(self, telegram_id: int) -> bool:
         row = cast(
