@@ -10,12 +10,31 @@
 - referral_holds: вступления сверх антифрод-лимита больше не теряются, а ждут
   решения администратора (/holds).
 - _database_url: строка подключения собирается через URL.create (#21).
+- реквизиты выплат шифруются при записи и расшифровываются при чтении (#20).
 """
 from __future__ import annotations
 
+from typing import Any
+
+from loguru import logger
 from sqlalchemy.engine import URL
 
+from utils import payment_details
 from utils.db.safe_db import SafeDatabase
+
+
+def _decrypt_row(row: Any) -> dict[str, Any] | None:
+    """Строка заявки с расшифрованным card_number (обычный dict вместо RowMapping)."""
+    if row is None:
+        return None
+    data = dict(row)
+    if "card_number" in data:
+        data["card_number"] = payment_details.decrypt(data["card_number"])
+    return data
+
+
+def _decrypt_rows(rows: Any) -> list[dict[str, Any]]:
+    return [r for r in (_decrypt_row(row) for row in rows or []) if r is not None]
 
 
 class ReferralDatabase(SafeDatabase):
@@ -260,3 +279,69 @@ class ReferralDatabase(SafeDatabase):
             )
         )
         return self._count_from_row(row)
+
+    # ======================================================
+    # Реквизиты выплат: шифрование (#20)
+    # ======================================================
+    async def ensure_payout_card_encryption(self, batch_size: int = 500) -> None:
+        """
+        Миграция при старте:
+        - card_number VARCHAR(50) → TEXT: зашифрованное значение длиннее 50 символов;
+        - если задан PAYOUT_ENCRYPTION_KEY, шифрует старые заявки пачками.
+        """
+        await self.execute("ALTER TABLE PayoutRequests ALTER COLUMN card_number TYPE TEXT")
+        if not payment_details.encryption_enabled():
+            return
+
+        total = 0
+        while True:
+            rows = await self.execute(
+                """
+                SELECT id, card_number FROM PayoutRequests
+                WHERE card_number IS NOT NULL AND card_number NOT LIKE 'enc:%'
+                ORDER BY id
+                LIMIT $1
+                """,
+                parameters=(batch_size,),
+                fetchall=True,
+            )
+            if not rows:
+                break
+            for row in rows:
+                await self.execute(
+                    "UPDATE PayoutRequests SET card_number = $1 WHERE id = $2 AND card_number = $3",
+                    parameters=(payment_details.encrypt(row["card_number"]), row["id"], row["card_number"]),
+                )
+            total += len(rows)
+            if len(rows) < batch_size:
+                break
+        if total:
+            logger.info(f"🔐 Зашифрованы реквизиты старых заявок: {total}")
+
+    async def add_payout_request(
+        self,
+        user_id: int,
+        full_name: str,
+        username: str | None,
+        card_number: str,
+        amount: float,
+    ) -> None:
+        await super().add_payout_request(
+            user_id=user_id,
+            full_name=full_name,
+            username=username,
+            card_number=payment_details.encrypt(card_number),
+            amount=amount,
+        )
+
+    async def get_pending_payouts(self):
+        return _decrypt_rows(await super().get_pending_payouts())
+
+    async def get_user_payouts(self, user_id: int):
+        return _decrypt_rows(await super().get_user_payouts(user_id))
+
+    async def get_user_payout_history(self, user_id: int):
+        return _decrypt_rows(await super().get_user_payout_history(user_id))
+
+    async def get_payout_request_by_id(self, request_id: int):
+        return _decrypt_row(await super().get_payout_request_by_id(request_id))

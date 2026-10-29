@@ -9,3 +9,6 @@ asyncpg==0.31.0
 environs==15.0.1
 PyYAML==6.0.3
 loguru==0.7.3
+
+# Шифрование реквизитов выплат (#20)
+cryptography==44.0.0

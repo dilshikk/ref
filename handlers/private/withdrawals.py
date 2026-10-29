@@ -9,11 +9,12 @@ from aiogram.fsm.context import FSMContext
 from loguru import logger
 
 from filters import private_only
-from data.config import ADMINS, GROUP_ID, url_yaml
+from data.config import ADMINS, GROUP_ID, MONEY_ADMINS, url_yaml
 from loader import db
 from states.flows import WithdrawalFlow
 from services.activity import activity_service
 from services.audit_log import audit_log_service
+from utils import payment_details
 
 router = private_only(Router(name="private.withdrawals"))
 
@@ -35,10 +36,8 @@ def _cfg_int(key: str, default: int) -> int:
 
 
 def _mask_payment_info(value: str | None) -> str:
-    """Карта/телефон для журналов: только последние 4 цифры.
-    Полные реквизиты хранятся лишь в заявке на выплату — там они нужны админу."""
-    digits = "".join(ch for ch in (value or "") if ch.isdigit())
-    return f"****{digits[-4:]}" if digits else "—"
+    """Карта/телефон для журналов: только последние 4 цифры."""
+    return payment_details.mask(value)
 
 
 # ======================================================
@@ -238,23 +237,28 @@ async def withdraw_phone(call: types.CallbackQuery, state: FSMContext) -> None:
 @router.message(WithdrawalFlow.CARD_NUMBER)
 async def get_card_number(message: types.Message, state: FSMContext) -> None:
     data = await state.get_data()
-    raw = (message.text or "").strip().replace(" ", "")
+    raw = message.text or ""
     withdraw_type = data.get("withdraw_type")
 
     if withdraw_type == "card":
-        if not raw.isdigit() or len(raw) != 16:
-            await message.reply("⚠️ Введите корректный номер карты (16 цифр).")
+        card = payment_details.normalize_card(raw)
+        if card is None:
+            await message.reply(
+                "⚠️ Номер карты неверный. Проверьте 16 цифр — возможно, в номере опечатка."
+            )
             return
-        await state.update_data(payment_info=raw)
+        await state.update_data(payment_info=card)
         await message.answer("👤 Введите имя держателя карты (Имя Фамилия):")
         await state.set_state(WithdrawalFlow.CARD_HOLDER)
     else:
-        is_with_plus = raw.startswith("+") and raw[1:].isdigit() and len(raw) == 13
-        is_without_plus = raw.isdigit() and len(raw) == 12
-        if not (is_with_plus or is_without_plus):
-            await message.reply("⚠️ Введите телефон в формате +998XXXXXXXXX или 998XXXXXXXXX")
+        phone = payment_details.normalize_uz_phone(raw)
+        if phone is None:
+            await message.reply(
+                "⚠️ Введите мобильный номер Узбекистана: +998XXXXXXXXX "
+                "(код оператора: 90, 91, 93, 94, 95, 97, 98, 99, 33, 88, 77, 50, 55, 20)."
+            )
             return
-        await state.update_data(payment_info=raw, card_holder="—")
+        await state.update_data(payment_info=phone, card_holder="—")
         await _show_confirm(message, state)
 
 
@@ -284,6 +288,11 @@ async def _show_confirm(message: types.Message, state: FSMContext) -> None:
         reply_markup=markup,
     )
     await state.set_state(WithdrawalFlow.END)
+
+
+def _details_for(admin_id: int, payment_info: str) -> str:
+    """Полные реквизиты нужны только тому, кто платит (MONEY_ADMINS); остальным — маска."""
+    return str(payment_info) if admin_id in MONEY_ADMINS else payment_details.mask(payment_info)
 
 
 # ======================================================
@@ -383,7 +392,7 @@ async def confirm_withdraw(call: types.CallbackQuery, state: FSMContext) -> None
                 f"👤 <a href='tg://user?id={user_id}'>{html.escape(call.from_user.full_name)}</a>\n"
                 f"🆔 ID: <code>{user_id}</code>\n"
                 f"💰 Сумма: <b>{balance}</b> сум\n"
-                f"💳 Реквизиты: <code>{html.escape(str(payment_info))}</code>\n"
+                f"💳 Реквизиты: <code>{html.escape(_details_for(admin, payment_info))}</code>\n"
                 f"👤 Держатель: {html.escape(str(card_holder))}",
                 parse_mode="HTML",
             )

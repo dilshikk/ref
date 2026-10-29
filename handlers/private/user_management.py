@@ -11,6 +11,7 @@ from filters.admin import IsBotAdminFilter, IsMoneyAdmin
 from loader import db, bot
 from states.flows import UserManagementFlow
 from services.audit_log import audit_log_service
+from utils.payment_details import mask
 
 router = private_only(Router(name="private.user_management"))
 
@@ -203,7 +204,7 @@ async def show_payout_history(call: types.CallbackQuery) -> None:
         text = f"📜 У пользователя <code>{telegram_id}</code> нет истории выплат."
     else:
         lines = [
-            f"💳 <code>{p['card_number']}</code> — <b>{p['amount']}</b> сум\n"
+            f"💳 <code>{mask(p['card_number'])}</code> — <b>{p['amount']}</b> сум\n"
             f"   Статус: {p['status']} | {p['created_at'].strftime('%d.%m.%Y %H:%M')}"
             for p in payouts
         ]
