@@ -1,4 +1,4 @@
-"""Тесты проверки реквизитов (#20, #44). Запуск: python -m pytest tests"""
+"""Тесты проверки реквизитов (#20, #44, #45). Запуск: python -m pytest tests"""
 import importlib.util
 from pathlib import Path
 
@@ -60,6 +60,45 @@ def test_encrypt_roundtrip(with_key):
 def test_no_key_keeps_plain_text(monkeypatch):
     monkeypatch.delenv("PAYOUT_ENCRYPTION_KEY", raising=False)
     assert _load().encrypt("4111111111111111") == "4111111111111111"
+
+
+# ======================================================
+# Проверка ключа при старте (#45)
+# ======================================================
+def test_startup_fails_without_key(monkeypatch):
+    monkeypatch.delenv("PAYOUT_ENCRYPTION_KEY", raising=False)
+    monkeypatch.delenv("ALLOW_PLAINTEXT_PAYOUTS", raising=False)
+    module = _load()
+    with pytest.raises(module.EncryptionConfigError, match="PAYOUT_ENCRYPTION_KEY"):
+        module.ensure_encryption_configured()
+
+
+def test_startup_allows_explicit_plaintext(monkeypatch):
+    monkeypatch.delenv("PAYOUT_ENCRYPTION_KEY", raising=False)
+    monkeypatch.setenv("ALLOW_PLAINTEXT_PAYOUTS", "1")
+    _load().ensure_encryption_configured()  # не падает
+
+
+@pytest.mark.parametrize("value", ["", "0", "true", "yes"])
+def test_only_exact_one_allows_plaintext(monkeypatch, value):
+    monkeypatch.delenv("PAYOUT_ENCRYPTION_KEY", raising=False)
+    monkeypatch.setenv("ALLOW_PLAINTEXT_PAYOUTS", value)
+    module = _load()
+    with pytest.raises(module.EncryptionConfigError):
+        module.ensure_encryption_configured()
+
+
+def test_startup_ok_with_key(with_key):
+    with_key.ensure_encryption_configured()
+
+
+def test_startup_fails_with_malformed_key(monkeypatch):
+    pytest.importorskip("cryptography.fernet")
+    monkeypatch.setenv("PAYOUT_ENCRYPTION_KEY", "not-a-valid-key")
+    monkeypatch.setenv("ALLOW_PLAINTEXT_PAYOUTS", "1")  # не спасает от неверного ключа
+    module = _load()
+    with pytest.raises(module.EncryptionConfigError, match="неверного формата"):
+        module.ensure_encryption_configured()
 
 
 # ======================================================

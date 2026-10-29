@@ -1,5 +1,6 @@
 # /www/wwwroot/uz_ibot/app.py
 import asyncio
+import sys
 
 from aiogram import Dispatcher
 from loguru import logger
@@ -11,6 +12,7 @@ from middlewares.callback_answer import CallbackAutoAnswerMiddleware
 from services.audit_log import audit_log_service
 from services.error_notify import notify_admins_about_error
 from utils.fsm_storage import PostgresStorage
+from utils.payment_details import EncryptionConfigError, ensure_encryption_configured
 
 # Состояния форм хранятся в базе: при перезапуске бота незаконченный
 # вывод средств или настройка в админке больше не теряются (раньше — MemoryStorage)
@@ -233,6 +235,13 @@ async def run_polling() -> None:
 
 
 def main() -> None:
+    # До подключения к базе и Telegram: без ключа реквизиты легли бы открытым текстом (#45)
+    try:
+        ensure_encryption_configured()
+    except EncryptionConfigError as e:
+        logger.critical(f"🔐 {e}")
+        sys.exit(1)
+
     try:
         asyncio.run(run_polling())
     except KeyboardInterrupt:
