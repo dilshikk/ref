@@ -1,4 +1,5 @@
 # Проверка кода и тесты на каждый push и pull request (#24)
+# + аудит зависимостей на уязвимости (#43)
 name: CI
 
 on:
@@ -6,6 +7,8 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -39,3 +42,20 @@ jobs:
 
       - name: pytest
         run: python -m pytest tests -q
+
+  audit:
+    name: pip-audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - run: pip install pip-audit==2.9.0
+
+      - name: Аудит зависимостей
+        run: pip-audit -r requirements.txt --strict --progress-spinner off
