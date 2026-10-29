@@ -7,6 +7,7 @@
 - на шаге ввода есть inline-кнопка «❌ Отмена»;
 - кнопка меню или команда во время ввода закрывают режим и обрабатываются
   как обычно (SkipHandler передаёт сообщение следующим роутерам).
+#88: текст приглашения написать берётся из «📝 Тексты» (ключ support), если задан.
 """
 import html
 
@@ -19,7 +20,7 @@ from loguru import logger
 from filters import private_only
 from filters.admin import IsBotAdminFilter
 from data.config import ADMINS
-from data.settings import get_settings
+from data.settings import custom_text, get_settings
 from keyboards.reply_keyboards import menu_kb, reply_keyboard_for_admin
 from states.flows import SupportFlow, AdminFlow
 
@@ -66,15 +67,25 @@ def _support_preview(message: types.Message) -> str:
     return "[Неподдерживаемый формат сообщения]"
 
 
-@router.message(F.text == "📞 Поддержка")
-async def support(message: types.Message, state: FSMContext) -> None:
+def _support_intro(full_name: str) -> str:
+    custom = custom_text("support", full_name)
+    if custom:
+        return custom
     support_link = get_settings().support
-    extra = f"\n\nТакже можно написать напрямую: {support_link}" if support_link else ""
-    await message.answer(
+    extra = f"\n\nТакже можно написать напрямую: {html.escape(support_link)}" if support_link else ""
+    return (
         "📞 <b>Служба поддержки</b>\n\n"
         "Напишите ваш вопрос одним сообщением.\n"
         "Сообщение будет отправлено администраторам, и ответ придет сюда в чат с ботом."
-        f"{extra}",
+        f"{extra}"
+    )
+
+
+@router.message(F.text == "📞 Поддержка")
+async def support(message: types.Message, state: FSMContext) -> None:
+    full_name = message.from_user.full_name if message.from_user else ""
+    await message.answer(
+        _support_intro(full_name),
         parse_mode="HTML",
         reply_markup=_cancel_kb,
     )

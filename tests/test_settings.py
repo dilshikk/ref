@@ -1,4 +1,4 @@
-"""Тесты чтения настроек (#22, #18). Запуск: python -m pytest tests"""
+"""Тесты чтения настроек (#22, #18, #88). Запуск: python -m pytest tests"""
 import importlib.util
 import sys
 import types
@@ -84,3 +84,27 @@ def test_poll_options(load):
         "Отлично", "Нормально", "Нужно улучшить")
     assert len(load({"poll_options": [str(i) for i in range(15)]}).get_settings().poll_options) == 10
     assert load({"poll_question": "  "}).get_settings().poll_question == "Насколько вам удобен наш бот?"
+
+
+def test_text_templates_only_known_nonempty_keys(load):
+    # #88: пустой шаблон и неизвестный ключ не заменяют текст по умолчанию
+    s = load({"text_templates": {"start": " Привет ", "help": "  ", "other": "x", "support": None}}).get_settings()
+    assert s.text_templates == {"start": "Привет"}
+    assert load({"text_templates": "мусор"}).get_settings().text_templates == {}
+    assert load({}).get_settings().text_templates == {}
+
+
+def test_custom_text_is_escaped_and_fills_name(load):
+    module = load({"text_templates": {"start": "Привет, {name}! <b>500</b> & больше"}})
+    assert module.custom_text("start", "<Ali>") == (
+        "Привет, &lt;Ali&gt;! &lt;b&gt;500&lt;/b&gt; &amp; больше"
+    )
+    assert module.custom_text("help") is None
+
+
+def test_custom_text_changes_apply_without_restart(load):
+    url_yaml: dict = {}
+    module = load(url_yaml)
+    assert module.custom_text("support") is None
+    url_yaml["text_templates"] = {"support": "Пишите нам"}  # так пишет «📝 Тексты»
+    assert module.custom_text("support") == "Пишите нам"

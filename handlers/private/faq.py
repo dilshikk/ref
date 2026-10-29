@@ -2,7 +2,7 @@ from aiogram import Router, types
 from aiogram.filters import Command
 
 from filters import private_only
-from data.settings import get_settings
+from data.settings import custom_text, get_settings
 
 router = private_only(Router(name="private.faq"))
 
@@ -10,11 +10,14 @@ router = private_only(Router(name="private.faq"))
 # забирал команду себе, так что этот код никогда не выполнялся.
 
 
-@router.message(Command("help"))
-async def help_command(message: types.Message) -> None:
+def default_help_text() -> str:
+    """
+    Текст /help по умолчанию. #105: кнопки названы так же, как в меню
+    (keyboards/reply_keyboards/menu.py), без несуществующих «🆘 Поддержка»
+    и «напиши любое сообщение».
+    """
     settings = get_settings()
-
-    text = (
+    return (
         "📖 <b>Как работает бот?</b>\n\n"
 
         "1️⃣ <b>Получи реферальную ссылку</b>\n"
@@ -24,23 +27,35 @@ async def help_command(message: types.Message) -> None:
         f"   Отправь ссылку друзьям. За каждого вступившего — <b>+{settings.invited_credit} сум</b>\n\n"
 
         "3️⃣ <b>Следи за балансом</b>\n"
-        "   Нажми «💰 Баланс» — увидишь сколько заработал\n\n"
+        "   Нажми «💰 Баланс» — увидишь, сколько заработал\n\n"
 
         "4️⃣ <b>Выводи деньги</b>\n"
+        "   Нажми «💸 Вывести средства»\n"
         f"   Минимум для вывода — <b>{settings.min_balance} сум</b>\n"
         f"   Перед выводом нужно добавить <b>{settings.group_member_count}</b> участников в группу\n"
         "   Вывод на карту или телефон\n\n"
 
-        "🏆 <b>Топ рефералов</b>\n"
-        "   Команда /top10 — посмотри кто лидирует\n\n"
-
         "👥 <b>Мои приглашённые</b>\n"
-        "   Нажми «👥 Мои приглашённые» — список тех кого привёл\n\n"
+        "   Последние приглашённые, сколько из них активны и сколько заработано\n\n"
+
+        "📜 <b>История выплат</b>\n"
+        "   Все твои заявки на вывод и их статус\n\n"
+
+        "📢 <b>Чат выплат</b>\n"
+        "   Публичный канал с подтверждениями выплат\n\n"
 
         "🗳 <b>Голосование</b>\n"
-        "   Напиши любое сообщение — получишь ссылку для голосования\n\n"
+        "   Нажми «🗳 Голосование» — получишь ссылку для голосования\n\n"
 
-        "❓ Есть вопросы? Нажми «🆘 Поддержка»"
+        "🏆 <b>Топ рефералов</b>\n"
+        "   Команда /top10 — посмотри, кто лидирует\n\n"
+
+        "❓ Есть вопросы? Нажми «📞 Поддержка»"
     )
 
+
+@router.message(Command("help"))
+async def help_command(message: types.Message) -> None:
+    # #88: текст из «📝 Тексты», если админ его задал
+    text = custom_text("help") or default_help_text()
     await message.answer(text, parse_mode="HTML")
