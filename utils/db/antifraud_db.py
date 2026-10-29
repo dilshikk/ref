@@ -1,6 +1,6 @@
 # utils/db/antifraud_db.py
 """
-Запросы антифрода (#18).
+Запросы антифрода (#18, #46).
 
 - get_referrals_last_day: суточный лимит приглашений в дополнение к часовому.
 - withdraw_captcha_state: неверные ответы капчи и блокировка вывода. Хранится в БД,
@@ -9,7 +9,9 @@
   увеличивают счётчик «добавил N участников» (GroupMembers.add_user_count).
 - group_member_activity: кто писал в группу (сигнал для проверки).
 - reverse_referral_on_leave: при выходе непроверенного участника счётчик
-  «добавил N» не уменьшается — он и не увеличивался.
+  «добавил N» не уменьшается — он и не увеличивался. Баланс может уйти в минус
+  (долг), если деньги за ушедшего уже выведены (#46).
+- get_unverified_referral_sum: деньги «на проверке», которые ещё нельзя вывести (#46).
 """
 from __future__ import annotations
 
@@ -35,6 +37,53 @@ class AntifraudDatabase(BroadcastDatabase):
             ),
         )
         return self._count_from_row(row)
+
+    # ======================================================
+    # Деньги «на проверке» (#46)
+    # ======================================================
+    async def get_unverified_referral_sum(
+        self,
+        user_id: int,
+        hold_hours: int,
+        group_id: int,
+        check_quality: bool,
+    ) -> int:
+        """
+        Сумма начислений за приглашённых, которые ещё нельзя вывести:
+        - не прошло hold_hours с вступления — выход приглашённого ещё снимет начисление;
+        - приглашённый не прошёл проверку живости (pending_group_adds без qualified_at),
+          если проверка включена. Приглашённые до #18 (записи в pending_group_adds нет)
+          считаются проверенными, как и в reverse_referral_on_leave.
+        Раньше всё начисленное выводилось сразу, а норма «добавил N» проверяла только
+        N человек — 200 непроверенных начислений проходили при 5 проверенных.
+        """
+        row = cast(
+            dict[str, Any] | None,
+            await self.execute(
+                """
+                SELECT COALESCE(SUM(m.reward_sum), 0)::bigint AS total
+                FROM UserInviteMember m
+                WHERE m.user_id = $1
+                  AND m.reversed_at IS NULL
+                  AND (
+                      (CAST($2 AS INT) > 0
+                       AND m.invited_at >= NOW() - make_interval(hours => CAST($2 AS INT)))
+                      OR (
+                          CAST($4 AS BOOLEAN)
+                          AND EXISTS (
+                              SELECT 1 FROM pending_group_adds p
+                              WHERE p.group_id = CAST($3 AS BIGINT)
+                                AND p.member_id = m.inveted_user_id
+                                AND p.qualified_at IS NULL
+                          )
+                      )
+                  )
+                """,
+                parameters=(user_id, int(hold_hours), group_id, bool(check_quality)),
+                fetchone=True,
+            ),
+        )
+        return max(0, int((row or {}).get("total") or 0))
 
     # ======================================================
     # Капча перед выводом
@@ -315,9 +364,13 @@ class AntifraudDatabase(BroadcastDatabase):
 
     async def reverse_referral_on_leave(self, invited_user_id: int, hold_hours: int, group_id: int):
         """
-        Как в SafeDatabase, но «добавил N участников» уменьшается, только если этот
-        человек был засчитан в счётчик: проверен (pending_group_adds.qualified_at)
-        или засчитан по старой схеме (записи в pending_group_adds нет).
+        Как в SafeDatabase, но:
+        - «добавил N участников» уменьшается, только если этот человек был засчитан
+          в счётчик: проверен (pending_group_adds.qualified_at) или засчитан по старой
+          схеме (записи в pending_group_adds нет);
+        - баланс НЕ обрезается до 0 (#46): если деньги за ушедшего уже выведены,
+          остаётся долг (отрицательный balance_sum), и он гасится следующими
+          начислениями. Раньше GREATEST(0, …) списывал потерю на владельца бота.
         Все CTE видят одно состояние таблиц, поэтому порядок с
         release_pending_add_on_leave не важен.
         """
@@ -337,7 +390,7 @@ class AntifraudDatabase(BroadcastDatabase):
                 UPDATE UserInviteCount uic
                 SET current_count = GREATEST(0, uic.current_count - 1),
                     history_count = GREATEST(0, uic.history_count - 1),
-                    balance_sum   = GREATEST(0, uic.balance_sum - rev.reward_sum),
+                    balance_sum   = uic.balance_sum - rev.reward_sum,
                     earned_sum    = GREATEST(0, uic.earned_sum - rev.reward_sum)
                 FROM rev
                 WHERE uic.user_id = rev.user_id

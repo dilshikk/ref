@@ -2,9 +2,14 @@
 """
 Проверка добавленных в группу перед зачётом в норму «добавил N участников» (#18).
 
-Проверка запускается по кнопке «✅ Я добавил(а)», без фоновых задач:
-для каждого непроверенного добавленного собираем сигналы (БД + Telegram)
+Проверка запускается по кнопке «✅ Я добавил(а)» и при выводе средств, без фоновых
+задач: для каждого непроверенного добавленного собираем сигналы (БД + Telegram)
 и решаем — засчитать, подождать или отклонить.
+
+Деньги «на проверке» (#46): начисление за приглашённого доступно к выводу, только
+когда его уже нельзя снять (прошло referral_hold_hours) и приглашённый прошёл ту же
+проверку живости. Раньше 200 непроверенных начислений выводились при 5 проверенных
+добавленных, а выход ботов после выплаты обнулял баланс без последствий.
 """
 from __future__ import annotations
 
@@ -15,6 +20,7 @@ from typing import Any
 from aiogram.exceptions import TelegramBadRequest
 from loguru import logger
 
+from data.config import GROUP_ID
 from data.settings import get_settings
 from loader import bot, db
 from utils.account_quality import MemberSignals, evaluate, is_enabled, is_member_status
@@ -36,6 +42,30 @@ class QualifyReport:
 def qualification_enabled() -> bool:
     s = get_settings()
     return is_enabled(s.add_min_hours, s.add_min_score)
+
+
+async def unverified_referral_sum(user_id: int) -> int:
+    """Сколько сум из баланса пока «на проверке» и не выводится (#46)."""
+    settings = get_settings()
+    return await db.get_unverified_referral_sum(
+        user_id,
+        hold_hours=settings.referral_hold_hours,
+        group_id=GROUP_ID,
+        check_quality=qualification_enabled(),
+    )
+
+
+def locked_explanation() -> str:
+    """Когда деньги «на проверке» станут доступны — для сообщений пользователю."""
+    settings = get_settings()
+    parts: list[str] = []
+    if settings.referral_hold_hours > 0:
+        parts.append(f"через {settings.referral_hold_hours} ч. после вступления друга")
+    if qualification_enabled():
+        parts.append("когда друг проявит активность (напишет в группу или запустит бота)")
+    if not parts:
+        return ""
+    return "Деньги за приглашённого станут доступны к выводу " + " и ".join(parts) + "."
 
 
 async def _has_photo(member_id: int) -> bool:

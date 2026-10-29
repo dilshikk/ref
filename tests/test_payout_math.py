@@ -1,4 +1,4 @@
-"""Тесты денежной логики баланса и выплат (#24). Запуск: python -m pytest tests"""
+"""Тесты денежной логики баланса и выплат (#24, #46). Запуск: python -m pytest tests"""
 import pytest
 from _load import load
 
@@ -35,3 +35,23 @@ def test_pending_total_ignores_none_and_garbage():
 )
 def test_available_never_negative(balance, pending, expected):
     assert pm.available_balance(balance, pending) == expected
+
+
+@pytest.mark.parametrize(
+    ("balance", "locked", "pending", "expected"),
+    [
+        (100000, 0, 0, 100000),
+        # #46: 200 свежих рефералов по 500 — вывести нельзя ничего, пока они не проверены
+        (100000, 100000, 0, 0),
+        (100000, 60000, 0, 40000),
+        (100000, 60000, 30000, 10000),
+        (100000, 60000, 50000, 0),
+        # долг после выхода приглашённых: вывести нечего
+        (-2500, 0, 0, 0),
+        (-2500, 1000, 0, 0),
+        # мусорные отрицательные значения не увеличивают доступное
+        (5000, -100, -100, 5000),
+    ],
+)
+def test_withdrawable(balance, locked, pending, expected):
+    assert pm.withdrawable(balance, locked, pending) == expected
