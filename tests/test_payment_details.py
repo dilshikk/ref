@@ -1,4 +1,4 @@
-"""Тесты проверки реквизитов (#20). Запуск: python -m pytest tests"""
+"""Тесты проверки реквизитов (#20, #44). Запуск: python -m pytest tests"""
 import importlib.util
 from pathlib import Path
 
@@ -16,6 +16,13 @@ def _load():
 
 
 pd = _load()
+
+
+@pytest.fixture
+def with_key(monkeypatch):
+    fernet = pytest.importorskip("cryptography.fernet")
+    monkeypatch.setenv("PAYOUT_ENCRYPTION_KEY", fernet.Fernet.generate_key().decode())
+    return _load()
 
 
 @pytest.mark.parametrize("number", ["4111111111111111", "4111 1111 1111 1111", "5555-5555-5555-4444"])
@@ -43,16 +50,50 @@ def test_mask():
     assert pd.mask(None) == "—"
 
 
-def test_encrypt_roundtrip(monkeypatch):
-    fernet = pytest.importorskip("cryptography.fernet")
-    monkeypatch.setenv("PAYOUT_ENCRYPTION_KEY", fernet.Fernet.generate_key().decode())
-    module = _load()
-    token = module.encrypt("4111111111111111")
+def test_encrypt_roundtrip(with_key):
+    token = with_key.encrypt("4111111111111111")
     assert token.startswith("enc:") and "4111111111111111" not in token
-    assert module.decrypt(token) == "4111111111111111"
-    assert module.decrypt("8600123412341234") == "8600123412341234"  # старая незашифрованная заявка
+    assert with_key.decrypt(token) == "4111111111111111"
+    assert with_key.decrypt("8600123412341234") == "8600123412341234"  # старая незашифрованная заявка
 
 
 def test_no_key_keeps_plain_text(monkeypatch):
     monkeypatch.delenv("PAYOUT_ENCRYPTION_KEY", raising=False)
     assert _load().encrypt("4111111111111111") == "4111111111111111"
+
+
+# ======================================================
+# Формы вывода в fsm_storage (#44)
+# ======================================================
+def test_seal_form_hides_card_and_holder(with_key):
+    form = {"balance": 50000, "payment_info": "4111111111111111", "card_holder": "Ali Valiyev", "withdraw_type": "card"}
+    sealed = with_key.seal_form(form)
+    stored = repr(sealed)
+    assert "4111111111111111" not in stored and "Ali Valiyev" not in stored
+    assert sealed["balance"] == 50000 and sealed["withdraw_type"] == "card"
+    assert form["payment_info"] == "4111111111111111"  # исходный словарь не меняется
+    assert with_key.open_form(sealed) == form
+
+
+def test_seal_form_twice_does_not_double_encrypt(with_key):
+    once = with_key.seal_form({"payment_info": "+998901234567"})
+    twice = with_key.seal_form(once)
+    assert with_key.open_form(twice)["payment_info"] == "+998901234567"
+
+
+def test_open_form_reads_old_plain_forms(with_key):
+    # Формы, сохранённые до #44, остаются рабочими
+    assert with_key.open_form({"payment_info": "4111111111111111"}) == {"payment_info": "4111111111111111"}
+
+
+def test_open_form_drops_unreadable_fields(with_key, monkeypatch):
+    sealed = with_key.seal_form({"payment_info": "4111111111111111", "balance": 1})
+    # Ключ сменился: реквизит не подставляется мусором, а пропадает — бот попросит начать заново
+    fernet = pytest.importorskip("cryptography.fernet")
+    monkeypatch.setenv("PAYOUT_ENCRYPTION_KEY", fernet.Fernet.generate_key().decode())
+    opened = _load().open_form(sealed)
+    assert "payment_info" not in opened and opened["balance"] == 1
+
+
+def test_seal_form_skips_non_strings_and_empty(with_key):
+    assert with_key.seal_form({"payment_info": None, "card_holder": ""}) == {"payment_info": None, "card_holder": ""}
