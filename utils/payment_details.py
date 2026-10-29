@@ -7,7 +7,8 @@
 - Шифрование: Fernet (библиотека cryptography), ключ в PAYOUT_ENCRYPTION_KEY.
   Зашифрованное значение хранится с префиксом "enc:", поэтому старые
   незашифрованные заявки продолжают читаться как есть.
-  Без ключа бот работает как раньше (открытым текстом) и пишет предупреждение.
+  Без ключа бот НЕ запускается (#45): ensure_encryption_configured() вызывается
+  при старте. Открытый текст разрешён только явным ALLOW_PLAINTEXT_PAYOUTS=1.
 - Формы вывода в fsm_storage (#44): seal_form/open_form шифруют карту и имя
   держателя перед записью в базу и расшифровывают при чтении.
 """
@@ -25,6 +26,11 @@ UNREADABLE = "⚠️ не расшифровано"
 
 # Поля формы вывода, которые нельзя хранить в fsm_storage открытым текстом (#44)
 SENSITIVE_FORM_FIELDS: tuple[str, ...] = ("payment_info", "card_holder")
+
+KEYGEN_HINT = (
+    "Создайте ключ: python -c \"from cryptography.fernet import Fernet; "
+    "print(Fernet.generate_key().decode())\" и добавьте PAYOUT_ENCRYPTION_KEY=... в .env"
+)
 
 # Коды мобильных операторов Узбекистана (после 998)
 UZ_MOBILE_CODES = frozenset(
@@ -83,19 +89,50 @@ def mask(value: str | None) -> str:
 # ======================================================
 # Шифрование
 # ======================================================
+class EncryptionConfigError(RuntimeError):
+    """Ключ шифрования реквизитов не задан или неверный — запускать бота нельзя."""
+
+
+def plaintext_allowed() -> bool:
+    return os.getenv("ALLOW_PLAINTEXT_PAYOUTS", "").strip() == "1"
+
+
 @lru_cache(maxsize=1)
 def _fernet() -> Any | None:
     key = os.getenv("PAYOUT_ENCRYPTION_KEY", "").strip()
     if not key:
         logger.warning(
-            "⚠️ PAYOUT_ENCRYPTION_KEY не задан: номера карт сохраняются открытым текстом. "
-            "Создайте ключ: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+            "⚠️ PAYOUT_ENCRYPTION_KEY не задан: номера карт сохраняются открытым текстом. " + KEYGEN_HINT
         )
         return None
     from cryptography.fernet import Fernet
 
     # Неверный ключ должен остановить запуск, а не тихо писать открытым текстом
     return Fernet(key.encode())
+
+
+def ensure_encryption_configured() -> None:
+    """
+    Проверка при старте бота (#45). Без ключа реквизиты клиентов легли бы в базу
+    открытым текстом, а предупреждение в логе легко не заметить — поэтому падаем.
+    Осознанно работать без шифрования можно только с ALLOW_PLAINTEXT_PAYOUTS=1.
+    """
+    try:
+        enabled = _fernet() is not None
+    except (ValueError, TypeError) as e:
+        raise EncryptionConfigError(
+            f"PAYOUT_ENCRYPTION_KEY неверного формата ({e}). {KEYGEN_HINT}"
+        ) from e
+    if enabled:
+        return
+    if plaintext_allowed():
+        logger.warning("⚠️ ALLOW_PLAINTEXT_PAYOUTS=1: реквизиты выплат НЕ шифруются.")
+        return
+    raise EncryptionConfigError(
+        "PAYOUT_ENCRYPTION_KEY не задан — бот не запущен, чтобы не хранить номера карт "
+        f"открытым текстом. {KEYGEN_HINT}. "
+        "Если работать без шифрования нужно осознанно, задайте ALLOW_PLAINTEXT_PAYOUTS=1."
+    )
 
 
 def encryption_enabled() -> bool:
