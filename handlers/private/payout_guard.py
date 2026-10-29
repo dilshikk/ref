@@ -1,8 +1,7 @@
 # handlers/private/payout_guard.py
 """
-Исправленные обработчики одобрения/отклонения выплат.
-Роутер подключается ДО admin_panel, поэтому старые обработчики
-approved_/rejected_/payout_receipt_input из admin_panel больше не срабатывают.
+Обработчики одобрения/отклонения выплат — единственные в проекте.
+Старые дубли approved_/rejected_/payout_receipt_input из admin_panel удалены (#35).
 
 Исправлено:
 - заявку нельзя одобрить/отклонить повторно (атомарная проверка status='pending');
@@ -16,7 +15,7 @@ approved_/rejected_/payout_receipt_input из admin_panel больше не ср
   число добавленных участников стало меньше нормы (например, приглашённые вышли
   из группы). Проверка идёт в том же SQL, что и списание, — атомарно.
 - одобрять/отклонять выплаты может только MONEY_ADMINS (#23); остальным админам
-  отвечает money_guard, и до старых обработчиков admin_panel нажатие не доходит.
+  отвечает money_guard.
 - список «💰 Заявки на выплаты» перехватывается здесь: полный номер карты видит
   только MONEY_ADMINS, остальные админы — маску ****1234 (#20).
 """
@@ -117,8 +116,8 @@ async def list_payouts(message: types.Message) -> None:
 @router.callback_query(F.data.startswith(_MONEY_CALLBACK_PREFIXES), IsAdminWithoutMoneyRights())
 async def money_guard(call: types.CallbackQuery) -> None:
     """
-    Обычный админ нажал денежную кнопку. Отвечаем здесь, чтобы нажатие не ушло
-    в старые обработчики admin_panel (они проверяют только ADMINS).
+    Обычный админ нажал денежную кнопку — сразу отвечаем понятным отказом,
+    а не молчанием (сами денежные обработчики требуют IsMoneyAdmin).
     """
     logger.warning(f"Админ {call.from_user.id} без прав MONEY_ADMIN нажал «{call.data}»")
     await call.answer("⛔ Выплаты и балансы может менять только финансовый администратор.", show_alert=True)
