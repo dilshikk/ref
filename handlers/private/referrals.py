@@ -1,4 +1,5 @@
-# /www/wwwroot/uz_ibot/handlers/private/referrals.py
+import html
+
 from aiogram import types, Router, F
 from loguru import logger
 
@@ -81,8 +82,8 @@ async def top_referrals(message: types.Message) -> None:
     lines: list[str] = []
 
     for i, row in enumerate(rows[:_TOP_LIMIT]):
-        name: str = row["full_name"] or "—"
-        username_part = f"@{row['username']}" if row.get("username") else ""
+        name: str = html.escape(row["full_name"] or "—")
+        username_part = f"@{html.escape(row['username'])}" if row.get("username") else ""
         count: int = row["history_count"]
         lines.append(
             f"{_MEDALS[i]} {name} {username_part}\n"
