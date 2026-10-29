@@ -12,12 +12,17 @@
   «добавил N» не уменьшается — он и не увеличивался. Баланс может уйти в минус
   (долг), если деньги за ушедшего уже выведены (#46).
 - get_unverified_referral_sum: деньги «на проверке», которые ещё нельзя вывести (#46).
+- reject_pending_add: приглашённый не прошёл проверку — начисление за него
+  снимается. Раньше деньги отклонённых навсегда оставались «на проверке» (#46).
 """
 from __future__ import annotations
 
 from typing import Any, cast
 
+from loguru import logger
+
 from utils.db.broadcast_db import BroadcastDatabase
+from utils.db.unverified_sql import unverified_sum_sql
 
 
 class AntifraudDatabase(BroadcastDatabase):
@@ -49,36 +54,15 @@ class AntifraudDatabase(BroadcastDatabase):
         check_quality: bool,
     ) -> int:
         """
-        Сумма начислений за приглашённых, которые ещё нельзя вывести:
-        - не прошло hold_hours с вступления — выход приглашённого ещё снимет начисление;
-        - приглашённый не прошёл проверку живости (pending_group_adds без qualified_at),
-          если проверка включена. Приглашённые до #18 (записи в pending_group_adds нет)
-          считаются проверенными, как и в reverse_referral_on_leave.
-        Раньше всё начисленное выводилось сразу, а норма «добавил N» проверяла только
-        N человек — 200 непроверенных начислений проходили при 5 проверенных.
+        Сумма начислений за приглашённых, которые ещё нельзя вывести (см. unverified_sum_sql).
+        Приглашённые до #18 (записи в pending_group_adds нет) считаются проверенными,
+        как и в reverse_referral_on_leave.
         """
+        locked = unverified_sum_sql("$1", "CAST($2 AS INT)", "CAST($3 AS BIGINT)", "CAST($4 AS BOOLEAN)")
         row = cast(
             dict[str, Any] | None,
             await self.execute(
-                """
-                SELECT COALESCE(SUM(m.reward_sum), 0)::bigint AS total
-                FROM UserInviteMember m
-                WHERE m.user_id = $1
-                  AND m.reversed_at IS NULL
-                  AND (
-                      (CAST($2 AS INT) > 0
-                       AND m.invited_at >= NOW() - make_interval(hours => CAST($2 AS INT)))
-                      OR (
-                          CAST($4 AS BOOLEAN)
-                          AND EXISTS (
-                              SELECT 1 FROM pending_group_adds p
-                              WHERE p.group_id = CAST($3 AS BIGINT)
-                                AND p.member_id = m.inveted_user_id
-                                AND p.qualified_at IS NULL
-                          )
-                      )
-                  )
-                """,
+                f"SELECT {locked} AS total",
                 parameters=(user_id, int(hold_hours), group_id, bool(check_quality)),
                 fetchone=True,
             ),
@@ -304,32 +288,111 @@ class AntifraudDatabase(BroadcastDatabase):
         )
         return row is not None
 
-    async def reject_pending_add(self, pending_id: int) -> None:
-        await self.execute(
-            """
-            UPDATE pending_group_adds SET rejected_at = NOW()
-            WHERE id = $1 AND qualified_at IS NULL AND rejected_at IS NULL
-            """,
-            parameters=(pending_id,),
+    async def reject_pending_add(self, pending_id: int) -> dict[str, Any] | None:
+        """
+        Атомарно: запись отклонена проверкой, и если человек пришёл по реферальной
+        ссылке — начисление за него снимается (как при выходе из группы, долг допускается).
+        Раньше деньги за отклонённого навсегда оставались «на проверке» (#46).
+        «Добавил N участников» не трогаем: непроверенный в счётчик не входил.
+        Возвращает {referrer_id, reward_sum}, если начисление снято, иначе None.
+        """
+        row = cast(
+            dict[str, Any] | None,
+            await self.execute(
+                """
+                WITH rej AS (
+                    UPDATE pending_group_adds
+                    SET rejected_at = NOW()
+                    WHERE id = $1 AND qualified_at IS NULL AND rejected_at IS NULL
+                    RETURNING inviter_id, member_id, source
+                ), rev AS (
+                    UPDATE UserInviteMember m
+                    SET reversed_at = NOW()
+                    FROM rej
+                    WHERE rej.source = 'referral'
+                      AND m.inveted_user_id = rej.member_id
+                      AND m.user_id = rej.inviter_id
+                      AND m.reversed_at IS NULL
+                    RETURNING m.user_id, m.reward_sum
+                ), ded AS (
+                    UPDATE UserInviteCount uic
+                    SET current_count = GREATEST(0, uic.current_count - 1),
+                        history_count = GREATEST(0, uic.history_count - 1),
+                        balance_sum   = uic.balance_sum - rev.reward_sum,
+                        earned_sum    = GREATEST(0, uic.earned_sum - rev.reward_sum)
+                    FROM rev
+                    WHERE uic.user_id = rev.user_id
+                    RETURNING uic.user_id
+                )
+                SELECT user_id AS referrer_id, reward_sum FROM rev
+                """,
+                parameters=(pending_id,),
+                fetchone=True,
+            ),
         )
+        return dict(row) if row else None
+
+    async def release_rejected_referral_money(self) -> None:
+        """
+        Миграция (#46): отклонённые проверкой до этого исправления оставили деньги
+        «на проверке» навсегда. Снимаем их начисления так же, как reject_pending_add.
+        Повторный запуск ничего не меняет (reversed_at IS NULL).
+        """
+        rows = await self.execute(
+            """
+            WITH rev AS (
+                UPDATE UserInviteMember m
+                SET reversed_at = NOW()
+                FROM pending_group_adds p
+                WHERE p.source = 'referral'
+                  AND p.rejected_at IS NOT NULL
+                  AND p.qualified_at IS NULL
+                  AND p.member_id = m.inveted_user_id
+                  AND p.inviter_id = m.user_id
+                  AND m.reversed_at IS NULL
+                RETURNING m.user_id, m.reward_sum
+            ), agg AS (
+                SELECT user_id, COUNT(*)::int AS c, SUM(reward_sum)::bigint AS s
+                FROM rev GROUP BY user_id
+            )
+            UPDATE UserInviteCount uic
+            SET current_count = GREATEST(0, uic.current_count - agg.c),
+                history_count = GREATEST(0, uic.history_count - agg.c),
+                balance_sum   = uic.balance_sum - agg.s,
+                earned_sum    = GREATEST(0, uic.earned_sum - agg.s)
+            FROM agg
+            WHERE uic.user_id = agg.user_id
+            RETURNING uic.user_id
+            """,
+            fetchall=True,
+        )
+        if rows:
+            logger.warning(f"⚠️ Сняты начисления за отклонённых проверкой у {len(rows)} пользователей (#46)")
 
     async def release_pending_add_on_leave(self, group_id: int, member_id: int, hold_hours: int) -> int | None:
         """
         Добавленный вышел из группы:
-        - не проверен — запись отклоняется, счётчик не трогаем (он не увеличивался);
+        - не проверен — запись отклоняется (reject_pending_add: начисление за
+          реферала снимается, даже если срок hold_hours прошёл), счётчик не трогаем;
         - проверен и добавлен вручную, вышел в срок hold_hours (0 — всегда) — -1 к
           «добавил N участников». Для вступивших по ссылке это делает
           reverse_referral_on_leave.
         Возвращает ID добавившего, если счётчик уменьшен.
         """
-        await self.execute(
-            """
-            UPDATE pending_group_adds SET rejected_at = NOW()
-            WHERE group_id = CAST($1 AS BIGINT) AND member_id = $2
-              AND qualified_at IS NULL AND rejected_at IS NULL
-            """,
-            parameters=(group_id, member_id),
+        pending = cast(
+            dict[str, Any] | None,
+            await self.execute(
+                """
+                SELECT id FROM pending_group_adds
+                WHERE group_id = CAST($1 AS BIGINT) AND member_id = $2
+                  AND qualified_at IS NULL AND rejected_at IS NULL
+                """,
+                parameters=(group_id, member_id),
+                fetchone=True,
+            ),
         )
+        if pending:
+            await self.reject_pending_add(int(pending["id"]))
         row = cast(
             dict[str, Any] | None,
             await self.execute(
