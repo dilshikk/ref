@@ -1,23 +1,26 @@
 # /www/wwwroot/uz_ibot/handlers/private/fallback.py
-"""Опрос «🗳 Голосование» и ответ на непонятные сообщения.
+"""Опрос «🗳 Голосование» и тихая обработка непонятных сообщений.
 
 Голос в опросе внутри бота НЕ оплачивается: он нужен только для обратной связи
 и статистики в «⚙️ Настройки» → «🗳 Опрос». Оплачивается голос (буст) за канал
 по ссылке «Проголосовать» — см. handlers/private/boosts.py.
+
+Неизвестные команды и любой непонятный текст бот теперь ИГНОРИРУЕТ (молчит).
+Раньше на каждое такое сообщение приходило «Оставьте свой голос👇» с кнопками
+буста — в том числе админу, который просто ввёл второй поисковый запрос
+или ответил после закрытой формы.
 """
 from typing import Any, cast
 
 from aiogram import Bot, Router, types, F
 from loguru import logger
 from filters import private_only
-from keyboards.inline_keyboards.actions import boost_keyboard
 from data.settings import get_settings
 from loader import db
 
 router = private_only(Router(name="private.fallback"))
 
 _THANKS = "Спасибо за голос! Ваше мнение помогает улучшать бота."
-_UNKNOWN_COMMAND = "Неизвестная команда. Список команд — /help"
 
 
 def _poll_config() -> tuple[str, list[str]]:
@@ -70,17 +73,19 @@ async def poll_answer_handler(poll_answer: types.PollAnswer, bot: Bot) -> None:
         logger.warning(f"Не удалось поблагодарить за голос user={user.id}: {e}")
 
 
-# Незнакомая команда (/что-то) — не реклама голоса, а подсказка про /help
+def _log_ignored(message: types.Message, kind: str) -> None:
+    user_id = message.from_user.id if message.from_user else "?"
+    logger.debug(f"Игнорирую {kind} от user={user_id}: {(message.text or message.content_type)!r}")
+
+
+# Незнакомая команда (/что-то) — молчим
 @router.message(F.text.startswith("/"))
 async def unknown_command(message: types.Message) -> None:
-    await message.answer(_UNKNOWN_COMMAND)
+    _log_ignored(message, "неизвестную команду")
 
 
+# Любое другое непонятное сообщение — тоже молчим. Обработчик нужен, чтобы
+# сообщение считалось обработанным и не шло дальше по цепочке.
 @router.message()
 async def fallback_handler(message: types.Message) -> None:
-    markup = boost_keyboard()
-    if markup:
-        await message.answer("Оставьте свой голос👇", reply_markup=markup)
-    else:
-        logger.warning("Ссылка «Проголосовать» не задана или невалидна")
-        await message.answer("Я пока не понял команду. Выберите действие в меню.")
+    _log_ignored(message, "непонятное сообщение")
