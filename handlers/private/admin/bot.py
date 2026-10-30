@@ -8,12 +8,14 @@ settings.py, а ссылка «Проголосовать» — только з�
 
 Голос в опросе внутри бота не оплачивается. Если ссылка «Проголосовать» ведёт на буст
 канала (https://t.me/boost/канал), бот видит, кто проголосовал, и платит один раз (boosts.py).
+При сохранении ссылки бот запоминает ID канала — так канал узнаётся и после смены юзернейма.
 """
 import html
 from typing import Any, cast
-from aiogram import Router, types, F
+from aiogram import Bot, Router, types, F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from loguru import logger
 from filters import private_only
 from keyboards.reply_keyboards import (
     bot_menu_settings_kb,
@@ -272,6 +274,35 @@ async def confirm_url_edit(call: types.CallbackQuery, state: FSMContext):
     await state.set_state(AdminFlow.set_url)
 
 
+async def _resolve_boost_chat(bot: Bot | None, url: str, actor_id: int) -> str:
+    """
+    Запоминает ID канала из ссылки на буст (переживает смену юзернейма).
+    Возвращает пояснение для админа.
+    """
+    target = boost_target(url)
+    if target is None:
+        await set_setting("boost_chat_id", None, actor_id)
+        return "\n\n⚠️ Это не ссылка на буст — бот не узнает, кто проголосовал, и не заплатит."
+    if bot is None:
+        await set_setting("boost_chat_id", None, actor_id)
+        return "\n\n🚀 Это ссылка на буст канала: бот будет платить за голос один раз."
+    try:
+        chat = await bot.get_chat(target)
+    except Exception as e:
+        logger.warning(f"Не удалось найти канал {target} для бустов: {e}")
+        await set_setting("boost_chat_id", None, actor_id)
+        return (
+            "\n\n⚠️ Бот не смог найти этот канал. Проверьте ссылку и что бот — администратор канала, "
+            "иначе он не увидит голоса."
+        )
+    await set_setting("boost_chat_id", chat.id, actor_id)
+    return (
+        "\n\n🚀 Это ссылка на буст канала: бот будет платить за голос один раз.\n"
+        "Канал запомнен — смена его юзернейма не помешает учёту голосов "
+        "(но ссылку для пользователей тогда нужно обновить)."
+    )
+
+
 @forms_router.message(AdminFlow.set_url, IsBotAdminFilter(ADMINS))
 async def update_url(message: types.Message, state: FSMContext):
     user = message.from_user
@@ -283,11 +314,7 @@ async def update_url(message: types.Message, state: FSMContext):
         return
     old_value = await set_setting("url", text, user.id)
     await record_setting_change(user.id, "url", old_value, text)
-    note = (
-        "\n\n🚀 Это ссылка на буст канала: бот будет платить за голос один раз."
-        if boost_target(text) is not None
-        else "\n\n⚠️ Это не ссылка на буст — бот не узнает, кто проголосовал, и не заплатит."
-    )
+    note = await _resolve_boost_chat(message.bot, text, user.id)
     await message.answer(
         f"✅ Ссылка «Проголосовать» обновлена: {html.escape(text)}{note}",
         parse_mode="HTML", reply_markup=settings_kb(), disable_web_page_preview=True,
