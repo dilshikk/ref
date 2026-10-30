@@ -31,6 +31,14 @@ ALREADY_REQUESTED_TEXT = (
     "Повторная заявка возможна через 24 часа."
 )
 
+# Финансовый админ не ограничен «раз в сутки», но одна заявка в ожидании — всё равно одна
+ADMIN_PENDING_TEXT = (
+    "⚠️ У вас уже есть заявка на вывод в ожидании.\n"
+    "Одобрите или отклоните её, затем подайте новую."
+)
+
+ADMIN_SKIP_MEMBERS_NOTE = "👑 Вы финансовый администратор: проверка добавленных участников пропущена.\n\n"
+
 
 def _mask_payment_info(value: str | None) -> str:
     """Карта/телефон для журналов: только последние 4 цифры."""
@@ -77,6 +85,21 @@ def _locked_note(locked: int) -> str:
         return ""
     explanation = locked_explanation()
     return f"\n🔒 На проверке: <b>{locked}</b> сум." + (f"\n<i>{explanation}</i>" if explanation else "")
+
+
+async def _ask_method(target: types.Message, state: FSMContext, header: str) -> None:
+    """Выбор способа вывода: «На карту» / «На телефон»."""
+    markup = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="💳 На карту", callback_data="withdraw_card")],
+        [types.InlineKeyboardButton(text="📱 На телефон", callback_data="withdraw_phone")],
+    ])
+    await target.answer(
+        f"{header}💸 Выберите способ вывода:",
+        parse_mode="HTML",
+        reply_markup=markup,
+    )
+    # Кнопки «На карту»/«На телефон» принимаются только в этом состоянии
+    await state.set_state(WithdrawalFlow.METHOD)
 
 
 # ======================================================
@@ -262,6 +285,11 @@ async def check_captcha(message: types.Message, state: FSMContext) -> None:
         logger.warning(f"Не удалось сбросить ошибки капчи user={user_id}: {e}")
     await state.update_data(captcha=None, captcha_issued_at=None)
 
+    # Финансовому админу норма «добавь N участников» не нужна — сразу к способу вывода
+    if is_money_admin(user_id):
+        await _ask_method(message, state, ADMIN_SKIP_MEMBERS_NOTE)
+        return
+
     settings = get_settings()
     required_members = settings.group_member_count
 
@@ -297,6 +325,10 @@ async def check_captcha(message: types.Message, state: FSMContext) -> None:
 async def check_group_members(call: types.CallbackQuery, state: FSMContext) -> None:
     await call.answer()
     user_id = call.from_user.id
+    if is_money_admin(user_id):
+        await _ask_method(call.message, state, ADMIN_SKIP_MEMBERS_NOTE)
+        return
+
     # Та же группа, в которой бот считает добавленных: «🆔 ID группы» в админке (#116).
     settings = get_settings()
     group_id = settings.group_id
@@ -331,18 +363,7 @@ async def check_group_members(call: types.CallbackQuery, state: FSMContext) -> N
         )
         return
 
-    markup = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="💳 На карту", callback_data="withdraw_card")],
-        [types.InlineKeyboardButton(text="📱 На телефон", callback_data="withdraw_phone")],
-    ])
-    await call.message.answer(
-        f"✅ Отлично! Добавлено <b>{added}</b> участников.\n\n"
-        "💸 Выберите способ вывода:",
-        parse_mode="HTML",
-        reply_markup=markup,
-    )
-    # Кнопки «На карту»/«На телефон» принимаются только в этом состоянии
-    await state.set_state(WithdrawalFlow.METHOD)
+    await _ask_method(call.message, state, f"✅ Отлично! Добавлено <b>{added}</b> участников.\n\n")
 
 
 # ======================================================
@@ -436,14 +457,17 @@ async def confirm_withdraw(call: types.CallbackQuery, state: FSMContext) -> None
     await call.answer()  # ✅ убираем спиннер
     data = await state.get_data()
     user_id = call.from_user.id
+    # Финансовый админ: без «раз в сутки» и без нормы добавленных участников
+    money_admin = is_money_admin(user_id)
 
     # Быстрая проверка, чтобы не гонять расчёт баланса зря.
     # Окончательная — в add_payout_request, в одном SQL со вставкой (#47)
-    existing = await db.get_pending_or_today_payout(user_id)
-    if existing:
-        await call.message.answer(ALREADY_REQUESTED_TEXT)
-        await state.clear()
-        return
+    if not money_admin:
+        existing = await db.get_pending_or_today_payout(user_id)
+        if existing:
+            await call.message.answer(ALREADY_REQUESTED_TEXT)
+            await state.clear()
+            return
 
     balance = data.get("balance")
     payment_info = data.get("payment_info")
@@ -472,7 +496,7 @@ async def confirm_withdraw(call: types.CallbackQuery, state: FSMContext) -> None
     # Норму «добавил N участников» тоже перепроверяем: форма могла пролежать в FSM
     # до 7 дней, и за это время добавленные могли выйти из группы
     settings = get_settings()
-    required_members = settings.group_member_count
+    required_members = 0 if money_admin else settings.group_member_count
     if required_members > 0:
         if settings.group_id is None:
             await call.message.answer(GROUP_NOT_SET_TEXT)
@@ -495,11 +519,12 @@ async def confirm_withdraw(call: types.CallbackQuery, state: FSMContext) -> None
         username=call.from_user.username or "—",
         card_number=payment_info,
         amount=balance,
+        allow_repeat_today=money_admin,
     )
     if request_id is None:
         # Заявку успели создать параллельно (второй экземпляр бота, двойное нажатие) (#47)
         logger.warning(f"Повторная заявка на вывод отклонена базой: user={user_id}")
-        await call.message.answer(ALREADY_REQUESTED_TEXT)
+        await call.message.answer(ADMIN_PENDING_TEXT if money_admin else ALREADY_REQUESTED_TEXT)
         await state.clear()
         return
 
@@ -510,7 +535,7 @@ async def confirm_withdraw(call: types.CallbackQuery, state: FSMContext) -> None
         entity_type="payout_request",
         entity_id=request_id,
         new_value={"amount": balance, "payment_info": _mask_payment_info(payment_info)},
-        payload={"withdraw_type": data.get("withdraw_type"), "user_id": user_id},
+        payload={"withdraw_type": data.get("withdraw_type"), "user_id": user_id, "money_admin": money_admin},
     )
     await activity_service.record(
         user_id=user_id,
@@ -527,11 +552,12 @@ async def confirm_withdraw(call: types.CallbackQuery, state: FSMContext) -> None
     await state.clear()
 
     # Имя и держатель экранируются: иначе Telegram отклонял сообщение и админ не узнавал о заявке
+    admin_mark = "\n👑 Заявка финансового администратора" if money_admin else ""
     for admin in ADMINS:
         try:
             await call.bot.send_message(
                 admin,
-                f"📢 <b>Новая заявка на вывод</b> #{request_id}\n\n"
+                f"📢 <b>Новая заявка на вывод</b> #{request_id}{admin_mark}\n\n"
                 f"👤 <a href='tg://user?id={user_id}'>{html.escape(call.from_user.full_name)}</a>\n"
                 f"🆔 ID: <code>{user_id}</code>\n"
                 f"💰 Сумма: <b>{balance}</b> сум\n"
