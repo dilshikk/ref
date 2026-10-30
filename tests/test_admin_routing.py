@@ -7,7 +7,11 @@ from collections import Counter
 from _load import ROOT
 
 ADMIN_DIR = ROOT / "handlers" / "private" / "admin"
-SECTIONS = ["menu", "stats", "finance", "users", "channels", "bot", "broadcasts", "settings", "security", "logs"]
+# finance_reports (#68, #71, #72) — сразу после finance: «💳 Балансы», «📊 Отчёты», «🎁 Бонусы»
+SECTIONS = [
+    "menu", "stats", "finance", "finance_reports", "users", "channels",
+    "bot", "broadcasts", "settings", "security", "logs",
+]
 
 
 def _handlers():
