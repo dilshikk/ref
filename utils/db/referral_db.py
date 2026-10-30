@@ -17,6 +17,9 @@
   Финансовому админу правило «раз в сутки» не применяется (allow_repeat_today).
 - имя держателя карты сохраняется в заявке (зашифрованным), чтобы после выплаты
   можно было проверить, на чьё имя переводили (#51).
+- saved_payment_details: бот запоминает реквизиты пользователя (карта с именем
+  держателя и телефон — отдельно), чтобы не вводить их при каждом выводе.
+  Хранятся зашифрованными, пользователь может удалить их сам.
 """
 from __future__ import annotations
 
@@ -456,3 +459,68 @@ class ReferralDatabase(SafeDatabase):
 
     async def get_payout_request_by_id(self, request_id: int):
         return _decrypt_row(await super().get_payout_request_by_id(request_id))
+
+    # ======================================================
+    # Сохранённые реквизиты пользователя
+    # ======================================================
+    async def create_table_saved_payment_details(self) -> None:
+        """
+        Последние реквизиты пользователя, по одной записи на способ вывода
+        (kind = 'card' или 'phone'). details и holder хранятся зашифрованными.
+        """
+        await self.execute(
+            """
+            CREATE TABLE IF NOT EXISTS saved_payment_details (
+                user_id     BIGINT NOT NULL,
+                kind        VARCHAR(16) NOT NULL,
+                details     TEXT NOT NULL,
+                holder      TEXT NULL,
+                updated_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (user_id, kind)
+            );
+            """
+        )
+
+    async def get_saved_payment_details(self, user_id: int, kind: str) -> dict[str, Any] | None:
+        """Зашифрованная запись как есть: расшифровка и проверка — в payment_details.open_saved."""
+        row = await self.execute(
+            "SELECT details, holder FROM saved_payment_details WHERE user_id = $1 AND kind = $2",
+            parameters=(user_id, kind),
+            fetchone=True,
+        )
+        return dict(row) if row else None
+
+    async def save_payment_details(self, user_id: int, kind: str, details: str, holder: str | None) -> None:
+        """Запоминает реквизиты; новые заменяют старые того же способа вывода."""
+        await self.execute(
+            """
+            INSERT INTO saved_payment_details (user_id, kind, details, holder)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (user_id, kind) DO UPDATE
+                SET details = EXCLUDED.details,
+                    holder = EXCLUDED.holder,
+                    updated_at = NOW()
+            """,
+            parameters=(
+                user_id,
+                kind,
+                payment_details.encrypt(details),
+                payment_details.encrypt(holder) if holder else None,
+            ),
+        )
+
+    async def delete_saved_payment_details(self, user_id: int) -> int:
+        """Пользователь удаляет все свои сохранённые реквизиты. Возвращает число удалённых записей."""
+        row = self._as_dict(
+            await self.execute(
+                """
+                WITH d AS (
+                    DELETE FROM saved_payment_details WHERE user_id = $1 RETURNING 1
+                )
+                SELECT COUNT(*) AS count FROM d
+                """,
+                parameters=(user_id,),
+                fetchone=True,
+            )
+        )
+        return self._count_from_row(row)
