@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 CHANNEL = -1009876543210
 USER = 777
 REWARD = 300
+EXPIRES = 1_800_000_000
 
 _TEST_ENV = {
     "BOT_TOKEN": "123456:TEST-TOKEN",
@@ -127,5 +128,33 @@ def test_other_channel_boost_is_not_reversed(db):
         await db.reward_boost_once(USER, CHANNEL, "b1", REWARD)
         assert await db.reverse_boost_reward(-100111, "b1", 0) is None
         assert await money(db) == (REWARD, REWARD)
+
+    run(db, body)
+
+
+def test_expiry_is_stored_and_read(db):
+    async def body():
+        await db.reward_boost_once(USER, CHANNEL, "b1", REWARD, EXPIRES)
+        row = await db.get_active_boost_reward(CHANNEL, "b1")
+        assert row is not None
+        assert int(row["user_id"]) == USER
+        assert int(row["expires_ts"]) == EXPIRES
+        assert await db.get_active_boost_reward(CHANNEL, "other") is None
+
+    run(db, body)
+
+
+def test_reward_moves_to_remaining_boost(db):
+    async def body():
+        # У Premium-пользователя два буста; убрал тот, за который заплатили
+        await db.reward_boost_once(USER, CHANNEL, "b1", REWARD, EXPIRES)
+        assert await db.move_boost_reward(CHANNEL, "b1", "b2", EXPIRES + 100) is not None
+        assert await db.get_active_boost_reward(CHANNEL, "b1") is None
+        row = await db.get_active_boost_reward(CHANNEL, "b2")
+        assert row is not None and int(row["expires_ts"]) == EXPIRES + 100
+        assert await money(db) == (REWARD, REWARD)
+        # Позже убрал и второй — теперь снимается
+        assert await db.reverse_boost_reward(CHANNEL, "b2", 0) is not None
+        assert await money(db) == (0, 0)
 
     run(db, body)
