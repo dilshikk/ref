@@ -22,6 +22,7 @@
   внутренние функции admin_panel (#36).
 - список «💰 Заявки на выплаты» перехватывается здесь: полный номер карты видит
   только денежный админ, остальные админы — маску ****1234 (#20).
+- в списке заявок показывается имя держателя карты, если оно было указано.
 """
 import html
 from typing import Any, cast
@@ -84,6 +85,12 @@ def _parse_req_id(data: str) -> int | None:
     return int(parts[2])
 
 
+def _holder_line(req: dict[str, Any]) -> str:
+    """Строка с держателем карты; у заявок без имени (вывод на телефон, старые заявки) — пусто."""
+    holder = str(req.get("card_holder") or "").strip()
+    return f"🪪 Держатель: <b>{html.escape(holder)}</b>\n" if holder else ""
+
+
 # Денежные кнопки, которые может нажимать только денежный админ (#23).
 _MONEY_CALLBACK_PREFIXES = ("approved_", "rejected_", "umgmt_addbal_", "umgmt_reset_", "umgmt_resetok_", "hold_ok_", "hold_no_")
 
@@ -114,6 +121,7 @@ async def list_payouts(message: types.Message) -> None:
             f"🆔 <b>{req['id']}</b> | "
             f"👤 <a href='tg://user?id={req['user_id']}'>{html.escape(str(req.get('full_name') or '-'))}</a>\n"
             f"💳 <code>{html.escape(card_text)}</code>\n"
+            f"{_holder_line(req)}"
             f"📅 {req.get('created_at')}",
             parse_mode="HTML",
             reply_markup=markup,
