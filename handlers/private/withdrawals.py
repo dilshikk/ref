@@ -39,6 +39,9 @@ ADMIN_PENDING_TEXT = (
 
 ADMIN_SKIP_MEMBERS_NOTE = "👑 Вы финансовый администратор: проверка добавленных участников пропущена.\n\n"
 
+# Вывод на телефон: имя держателя не спрашивается
+NO_HOLDER = "—"
+
 
 def _mask_payment_info(value: str | None) -> str:
     """Карта/телефон для журналов: только последние 4 цифры."""
@@ -212,7 +215,8 @@ async def _send_captcha(target: types.Message, state: FSMContext, prefix: str = 
     await state.update_data(captcha=c.answer, captcha_issued_at=time.time())
     await target.answer(
         f"{prefix}🧩 Для безопасности решите пример и отправьте ответ числом:\n\n"
-        f"<b>{c.question} = ?</b>",
+        f"<b>{c.question} = ?</b>\n\n"
+        f"⏱ На ответ даётся <b>{captcha.time_limit_text()}</b>",
         parse_mode="HTML",
     )
     await state.set_state(WithdrawalFlow.CAPTCHA)
@@ -412,7 +416,7 @@ async def get_card_number(message: types.Message, state: FSMContext) -> None:
                 "(код оператора: 90, 91, 93, 94, 95, 97, 98, 99, 33, 88, 77, 50, 55, 20)."
             )
             return
-        await state.update_data(payment_info=phone, card_holder="—")
+        await state.update_data(payment_info=phone, card_holder=NO_HOLDER)
         await _show_confirm(message, state)
 
 
@@ -422,7 +426,8 @@ async def get_card_holder(message: types.Message, state: FSMContext) -> None:
     if len(name.split()) < 2:
         await message.reply("⚠️ Введите полное имя (Имя Фамилия).")
         return
-    await state.update_data(card_holder=name)
+    # Имя сохраняется в заявке (колонка card_holder, до 255 символов достаточно)
+    await state.update_data(card_holder=name[:255])
     await _show_confirm(message, state)
 
 
@@ -437,7 +442,7 @@ async def _show_confirm(message: types.Message, state: FSMContext) -> None:
         f"📋 <b>Проверьте данные:</b>\n\n"
         f"💰 Сумма: <b>{data.get('balance')}</b> сум\n"
         f"💳 Реквизиты: <code>{html.escape(str(data.get('payment_info')))}</code>\n"
-        f"👤 Держатель: <b>{html.escape(str(data.get('card_holder', '—')))}</b>",
+        f"👤 Держатель: <b>{html.escape(str(data.get('card_holder', NO_HOLDER)))}</b>",
         parse_mode="HTML",
         reply_markup=markup,
     )
@@ -471,7 +476,7 @@ async def confirm_withdraw(call: types.CallbackQuery, state: FSMContext) -> None
 
     balance = data.get("balance")
     payment_info = data.get("payment_info")
-    card_holder = data.get("card_holder", "—")
+    card_holder = str(data.get("card_holder") or NO_HOLDER)
 
     if not balance or not payment_info:
         await call.message.answer("⚠️ Сессия устарела. Начните вывод заново.")
@@ -513,12 +518,15 @@ async def confirm_withdraw(call: types.CallbackQuery, state: FSMContext) -> None
             await state.clear()
             return
 
+    # Имя держателя сохраняем в заявке: его видно в «💰 Заявки на выплаты».
+    # Раньше оно было только в уведомлении админам (#51)
     request_id = await db.add_payout_request(
         user_id=user_id,
         full_name=call.from_user.full_name,
         username=call.from_user.username or "—",
         card_number=payment_info,
         amount=balance,
+        card_holder=None if card_holder == NO_HOLDER else card_holder,
         allow_repeat_today=money_admin,
     )
     if request_id is None:
@@ -562,7 +570,7 @@ async def confirm_withdraw(call: types.CallbackQuery, state: FSMContext) -> None
                 f"🆔 ID: <code>{user_id}</code>\n"
                 f"💰 Сумма: <b>{balance}</b> сум\n"
                 f"💳 Реквизиты: <code>{html.escape(_details_for(admin, payment_info))}</code>\n"
-                f"👤 Держатель: {html.escape(str(card_holder))}",
+                f"👤 Держатель: <b>{html.escape(card_holder)}</b>",
                 parse_mode="HTML",
             )
         except Exception as e:
