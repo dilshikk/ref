@@ -6,6 +6,7 @@
   (#46, нельзя вывести сейчас), долги, заявки в ожидании, топ-10 по балансу.
 - «📊 Отчёты» (#72): сводка за 24ч / 7д / 30д — заявки на вывод по статусам,
   начисления за приглашённых и голоса (бусты) за канал, снятия, ручные бонусы.
+  Снятия за отмену голоса за канал считаются по дате отмены.
 - «🎁 Бонусы» (#71): последние ручные начисления из audit_logs
   (action='admin_balance_changed', пишет user_management.add_balance_process).
 
@@ -179,15 +180,16 @@ async def _report_text(days: int) -> str:
         """,
         params,
     )
+    # Начисления — по дате начисления, снятия — по дате отмены голоса
     boosts = await _row(
         f"""
         SELECT
-            COUNT(*) FILTER (WHERE reversed_at IS NULL) AS boost_count,
-            COALESCE(SUM(reward_sum) FILTER (WHERE reversed_at IS NULL), 0) AS boost_sum,
-            COUNT(*) FILTER (WHERE reversed_at IS NOT NULL) AS boost_reversed_count,
-            COALESCE(SUM(reward_sum) FILTER (WHERE reversed_at IS NOT NULL), 0) AS boost_reversed_sum
+            COUNT(*) FILTER (WHERE rewarded_at >= {since} AND reversed_at IS NULL) AS boost_count,
+            COALESCE(SUM(reward_sum) FILTER (WHERE rewarded_at >= {since} AND reversed_at IS NULL), 0) AS boost_sum,
+            COUNT(*) FILTER (WHERE reversed_at >= {since}) AS boost_reversed_count,
+            COALESCE(SUM(reward_sum) FILTER (WHERE reversed_at >= {since}), 0) AS boost_reversed_sum
         FROM boost_rewards
-        WHERE rewarded_at >= {since}
+        WHERE rewarded_at >= {since} OR reversed_at >= {since}
         """,
         params,
     )
@@ -225,7 +227,7 @@ async def _report_text(days: int) -> str:
         f"📈 Всего начислено: <b>{money(credited_total)}</b> сум\n\n"
         f"↩️ Снято за выход из группы: <b>{to_int(referrals.get('reversed_count'))}</b> "
         f"на <b>{money(referrals.get('reversed_sum'))}</b> сум\n"
-        f"↩️ Снято за отмену голоса за канал: <b>{to_int(boosts.get('boost_reversed_count'))}</b> "
+        f"↩️ Снято за отмену голоса за канал (по дате отмены): <b>{to_int(boosts.get('boost_reversed_count'))}</b> "
         f"на <b>{money(boosts.get('boost_reversed_sum'))}</b> сум"
     )
 

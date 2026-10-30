@@ -57,6 +57,7 @@ SETTING_KEYS: frozenset[str] = frozenset({
     "invited_credit",
     "boost_credit",      # сум за голос (буст) канала, один раз на человека
     "boost_hold_hours",  # отмена буста в течение N ч. снимает начисление
+    "boost_chat_id",     # ID канала из ссылки «Проголосовать» (переживает смену юзернейма)
     "min_balance",
     "max_withdraw",
     "group_member_count",
@@ -107,6 +108,7 @@ class Settings:
     invited_credit: int          # сум за приглашённого
     boost_credit: int            # сум за голос (буст) канала, один раз на человека
     boost_hold_hours: int        # отмена буста в течение стольких часов снимает начисление (0 — всегда)
+    boost_chat_id: int | None    # ID канала для бустов; None — ещё не определён
     min_balance: int             # минимальная сумма вывода
     max_withdraw: int            # максимальная сумма одного вывода
     group_member_count: int      # сколько участников нужно добавить перед выводом
@@ -219,6 +221,7 @@ def get_settings() -> Settings:
         invited_credit=_int("invited_credit", DEFAULT_INVITED_CREDIT),
         boost_credit=_int("boost_credit", DEFAULT_BOOST_CREDIT),
         boost_hold_hours=_int("boost_hold_hours", DEFAULT_BOOST_HOLD_HOURS),
+        boost_chat_id=_chat_id("boost_chat_id"),
         min_balance=_int("min_balance", DEFAULT_MIN_BALANCE),
         max_withdraw=_int("max_withdraw", DEFAULT_MAX_WITHDRAW, minimum=1),
         group_member_count=_int("group_member_count", DEFAULT_GROUP_MEMBER_COUNT),
