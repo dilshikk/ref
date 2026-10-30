@@ -9,7 +9,7 @@
 - после каждой ошибки — новый пример;
 - MAX_ATTEMPTS ошибок подряд блокируют вывод на LOCK_SECONDS. Счётчик хранится
   в БД (withdraw_captcha_state), поэтому /start и перезапуск бота его не сбрасывают;
-- на ответ даётся TTL_SECONDS, потом выдаётся новый пример.
+- на ответ даётся TTL_SECONDS (1 минута), потом выдаётся новый пример.
 
 Модуль без зависимостей от aiogram и БД, чтобы его было просто тестировать.
 """
@@ -21,7 +21,8 @@ from dataclasses import dataclass
 
 MAX_ATTEMPTS = 3
 LOCK_SECONDS = 15 * 60
-TTL_SECONDS = 5 * 60
+# Одна минута на ответ: человеку хватает, а решать пример «на стороне» уже неудобно
+TTL_SECONDS = 60
 # Ошибки старше этого окна не копятся: две ошибки месяц назад не должны
 # блокировать вывод с первой ошибки сегодня
 FAIL_WINDOW_SECONDS = 60 * 60
@@ -61,3 +62,10 @@ def parse_answer(text: str | None) -> int | None:
 
 def is_expired(issued_at: float | None, now: float) -> bool:
     return issued_at is None or now - float(issued_at) > TTL_SECONDS
+
+
+def time_limit_text() -> str:
+    """Сколько времени на ответ — для текста сообщения ("1 мин." / "30 сек.")."""
+    if TTL_SECONDS % 60 == 0:
+        return f"{TTL_SECONDS // 60} мин."
+    return f"{TTL_SECONDS} сек."

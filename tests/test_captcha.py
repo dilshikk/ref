@@ -43,6 +43,13 @@ def test_expiry():
     assert captcha.is_expired(0, captcha.TTL_SECONDS + 1)
 
 
+def test_one_minute_to_answer():
+    assert captcha.TTL_SECONDS == 60
+    assert not captcha.is_expired(1000, 1059)
+    assert captcha.is_expired(1000, 1061)
+    assert captcha.time_limit_text() == "1 мин."
+
+
 def test_limits():
     assert captcha.MAX_ATTEMPTS == 3
     assert captcha.LOCK_SECONDS == 15 * 60
