@@ -8,6 +8,7 @@
 - при одобрении списывается только выплаченная сумма, остаток баланса сохраняется;
 - при одобрении из счётчика «добавил N участников» списывается норма для вывода
   (group_member_count), чтобы одних и тех же людей нельзя было использовать повторно;
+  у заявки финансового админа норма не проверяется и не списывается;
 - кнопки «одобрить/отклонить» убираются только после окончательного решения:
   если админ нажал «одобрить» и не прислал чек, заявку можно добить или отклонить позже;
 - шаг с чеком можно отменить, админ больше не «застревает» в нём;
@@ -244,9 +245,12 @@ async def payout_finalize_with_receipt(message: types.Message, state: FSMContext
 
     settings = get_settings()
     group_id = settings.group_id
+    # Заявка финансового админа: норма «добавил N участников» не проверяется и не списывается
+    requester_is_money_admin = is_money_admin(int(payout_row["user_id"]))
+    required_members = 0 if requester_is_money_admin else settings.group_member_count
     # Без группы нельзя проверить норму «добавил N участников» — не одобряем вслепую.
     # Заявка остаётся в ожидании, админ одобрит её после того, как укажет группу.
-    if group_id is None:
+    if group_id is None and required_members > 0:
         await state.clear()
         await message.answer(GROUP_NOT_SET_TEXT, reply_markup=finance_kb())
         return
@@ -255,7 +259,6 @@ async def payout_finalize_with_receipt(message: types.Message, state: FSMContext
     # а не обнуляем весь баланс: остаток и новые рефералы сохраняются.
     amount = int(payout_row.get("amount") or 0)
     credits_to_deduct = credits_for_amount(amount, settings.invited_credit)
-    required_members = settings.group_member_count
     hold_hours = settings.referral_hold_hours
     check_quality = qualification_enabled()
 
