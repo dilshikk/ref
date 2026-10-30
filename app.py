@@ -86,6 +86,8 @@ async def setup_aiogram(dispatcher: Dispatcher) -> None:
 
 async def database_connected() -> None:
     """Создание всех таблиц и применение миграций при старте."""
+    from services.group_adds import release_waiting_adds
+
     # Таблицы
     await db.create_table_users()
     await db.create_table_channel()
@@ -138,6 +140,8 @@ async def database_connected() -> None:
     await db.ensure_broadcast_progress_columns()
     # Деньги за отклонённых проверкой больше не висят «на проверке» навсегда (#46)
     await db.release_rejected_referral_money()
+    # Проверка «24 ч. + активность» убрана: ждавшие её добавленные засчитываются сейчас
+    await release_waiting_adds()
 
     # Разовый перенос url.yml и .env в bot_settings, затем загрузка в память (#114).
     # До подключения обработчиков: они читают настройки через get_settings().
