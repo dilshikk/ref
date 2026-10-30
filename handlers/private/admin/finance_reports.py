@@ -5,7 +5,7 @@
 - «💳 Балансы» (#68): сколько денег на балансах, сколько из них «на проверке»
   (#46, нельзя вывести сейчас), долги, заявки в ожидании, топ-10 по балансу.
 - «📊 Отчёты» (#72): сводка за 24ч / 7д / 30д — заявки на вывод по статусам,
-  начисления за приглашённых и голоса, снятия за выход, ручные бонусы.
+  начисления за приглашённых и голоса (бусты) за канал, снятия, ручные бонусы.
 - «🎁 Бонусы» (#71): последние ручные начисления из audit_logs
   (action='admin_balance_changed', пишет user_management.add_balance_process).
 
@@ -170,11 +170,24 @@ async def _report_text(days: int) -> str:
         """,
         params,
     )
+    # Старые награды за голос в опросе бота (сейчас не начисляются, видны в старых периодах)
     votes = await _row(
         f"""
         SELECT COUNT(*) AS vote_count, COALESCE(SUM(reward_sum), 0) AS vote_sum
         FROM poll_vote_rewards
         WHERE created_at >= {since}
+        """,
+        params,
+    )
+    boosts = await _row(
+        f"""
+        SELECT
+            COUNT(*) FILTER (WHERE reversed_at IS NULL) AS boost_count,
+            COALESCE(SUM(reward_sum) FILTER (WHERE reversed_at IS NULL), 0) AS boost_sum,
+            COUNT(*) FILTER (WHERE reversed_at IS NOT NULL) AS boost_reversed_count,
+            COALESCE(SUM(reward_sum) FILTER (WHERE reversed_at IS NOT NULL), 0) AS boost_reversed_sum
+        FROM boost_rewards
+        WHERE rewarded_at >= {since}
         """,
         params,
     )
@@ -187,7 +200,16 @@ async def _report_text(days: int) -> str:
         params,
     )
     credited_total = (
-        to_int(referrals.get("credited_sum")) + to_int(votes.get("vote_sum")) + to_int(bonuses.get("bonus_sum"))
+        to_int(referrals.get("credited_sum"))
+        + to_int(votes.get("vote_sum"))
+        + to_int(boosts.get("boost_sum"))
+        + to_int(bonuses.get("bonus_sum"))
+    )
+    old_votes_line = (
+        f"🗳 За голоса в опросе (раньше): <b>{to_int(votes.get('vote_count'))}</b> "
+        f"на <b>{money(votes.get('vote_sum'))}</b> сум\n"
+        if to_int(votes.get("vote_count"))
+        else ""
     )
     return (
         f"📊 <b>Отчёт за {REPORT_PERIODS[days]}</b>\n\n"
@@ -197,11 +219,14 @@ async def _report_text(days: int) -> str:
         f"⏳ Ждут решения: <b>{to_int(payouts.get('pending_count'))}</b> на <b>{money(payouts.get('pending_sum'))}</b> сум\n\n"
         "<b>Начисления</b>\n"
         f"🎁 За приглашённых: <b>{to_int(referrals.get('credited_count'))}</b> на <b>{money(referrals.get('credited_sum'))}</b> сум\n"
-        f"🗳 За голоса: <b>{to_int(votes.get('vote_count'))}</b> на <b>{money(votes.get('vote_sum'))}</b> сум\n"
+        f"🚀 За голос за канал: <b>{to_int(boosts.get('boost_count'))}</b> на <b>{money(boosts.get('boost_sum'))}</b> сум\n"
+        f"{old_votes_line}"
         f"➕ Ручные бонусы: <b>{to_int(bonuses.get('bonus_count'))}</b> на <b>{money(bonuses.get('bonus_sum'))}</b> сум\n"
         f"📈 Всего начислено: <b>{money(credited_total)}</b> сум\n\n"
         f"↩️ Снято за выход из группы: <b>{to_int(referrals.get('reversed_count'))}</b> "
-        f"на <b>{money(referrals.get('reversed_sum'))}</b> сум"
+        f"на <b>{money(referrals.get('reversed_sum'))}</b> сум\n"
+        f"↩️ Снято за отмену голоса за канал: <b>{to_int(boosts.get('boost_reversed_count'))}</b> "
+        f"на <b>{money(boosts.get('boost_reversed_sum'))}</b> сум"
     )
 
 

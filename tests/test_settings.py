@@ -23,11 +23,11 @@ def load():
 def test_garbage_numbers_fall_back_to_defaults(load):
     # Именно такие значения раньше роняли int() в /start
     s = load({"invited_credit": "abc", "min_balance": "", "max_withdraw": None,
-              "vote_credit": True, "group_member_count": [1]}).get_settings()
+              "boost_credit": True, "group_member_count": [1]}).get_settings()
     assert s.invited_credit == 0
     assert s.min_balance == 0
     assert s.max_withdraw == 9_999_999
-    assert s.vote_credit == 0
+    assert s.boost_credit == 0
     assert s.group_member_count == 3
 
 
@@ -64,6 +64,7 @@ def test_antifraud_values(load):
 
 def test_zero_hold_hours_is_allowed(load):
     assert load({"referral_hold_hours": 0}).get_settings().referral_hold_hours == 0
+    assert load({"boost_hold_hours": 0}).get_settings().boost_hold_hours == 0
 
 
 def test_changes_apply_without_restart(load):

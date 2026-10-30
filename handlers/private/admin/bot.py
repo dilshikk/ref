@@ -5,6 +5,9 @@
 которые повторяли «💰 Тарифы» и «📊 Лимиты». Числа теперь меняются только в
 settings.py, а ссылка «Проголосовать» — только здесь, рядом с опросом
 (раньше она была ещё и в «⚙️ Настройки каналов»).
+
+Голос в опросе внутри бота не оплачивается. Если ссылка «Проголосовать» ведёт на буст
+канала (https://t.me/boost/канал), бот видит, кто проголосовал, и платит один раз (boosts.py).
 """
 import html
 from typing import Any, cast
@@ -22,6 +25,7 @@ from filters.admin import IsBotAdminFilter
 from data.config import ADMINS
 from data.settings import NAME_PLACEHOLDER, TEXT_TEMPLATE_KEYS, get_raw, get_settings
 from services.settings_store import set_setting
+from utils.boost_link import boost_target
 from utils.bot_commands import ADMIN_COMMANDS, USER_COMMANDS, format_commands, set_all_commands
 
 from .common import cancel_kb, forms_router, record_setting_change, short_text
@@ -36,6 +40,8 @@ TEMPLATE_PLACES: dict[str, str] = {
     "help": "ответ на /help",
     "support": "текст после кнопки «📞 Поддержка»",
 }
+# Сколько последних проголосовавших за канал показывать в «🗳 Опрос»
+BOOST_LIST_LIMIT = 10
 
 
 def _texts_overview() -> str:
@@ -136,6 +142,30 @@ _vote_url_kb = InlineKeyboardMarkup(
 )
 
 
+async def _boost_section(vote_url: str) -> str:
+    """Кто проголосовал (буст) за канал по ссылке «Проголосовать»."""
+    if boost_target(vote_url) is None:
+        return (
+            "⚠️ Это не ссылка на буст канала — бот не узнает, кто проголосовал, и не заплатит.\n"
+            "Укажите ссылку вида <code>https://t.me/boost/канал</code>."
+        )
+    stats = await db.boost_reward_stats()
+    rows = cast(list[dict[str, Any]], await db.list_recent_boost_rewards(BOOST_LIST_LIMIT) or [])
+    lines = []
+    for row in rows:
+        name = html.escape(row.get("full_name") or "—")
+        username = f" @{html.escape(row['username'])}" if row.get("username") else ""
+        mark = " ↩️ отменил" if row.get("reversed_at") else ""
+        lines.append(f"• {name}{username} — {int(row.get('reward_sum') or 0)} сум{mark} — /uid{row['user_id']}")
+    listing = ("\nПоследние:\n" + "\n".join(lines)) if lines else "\nПока никто не проголосовал."
+    return (
+        f"🚀 Проголосовали за канал и получили награду: <b>{stats['total']}</b> "
+        f"(действует сейчас: <b>{stats['active']}</b>)\n"
+        f"💰 Награда: <b>{get_settings().boost_credit}</b> сум — меняется в «🎁 Награды»"
+        f"{listing}"
+    )
+
+
 @router.message(F.text == "🗳 Опрос", IsBotAdminFilter(ADMINS))
 async def bot_polls_menu(message: types.Message, state: FSMContext):
     # Вопрос и варианты разбирает get_settings() — та же логика, что при рассылке
@@ -156,15 +186,17 @@ async def bot_polls_menu(message: types.Message, state: FSMContext):
     vote_url = settings.vote_url or "не задана"
 
     await message.answer(
-        "🗳 <b>Опрос</b>\n\n"
+        "🗳 <b>Опрос</b> (внутри бота, не оплачивается)\n\n"
         f"Текущий вопрос:\n<b>{html.escape(question)}</b>\n\n"
         "Варианты и голоса:\n"
         + "\n".join(lines)
         + "\n\n"
         f"Уникальных голосовавших: <b>{voters}</b>\n"
         f"Опрос отправлен пользователям: <b>{polls_sent}</b> раз\n\n"
-        "🔗 Ссылка «Проголосовать» (бот показывает её, когда не понял сообщение):\n"
-        f"<code>{html.escape(vote_url)}</code>",
+        "🔗 Ссылка «Проголосовать» (кнопка «🚀 Голос за канал» и ответ, когда бот "
+        "не понял сообщение):\n"
+        f"<code>{html.escape(vote_url)}</code>\n\n"
+        + await _boost_section(settings.vote_url),
         parse_mode="HTML",
         reply_markup=_vote_url_kb,
     )
@@ -230,8 +262,12 @@ async def confirm_url_edit(call: types.CallbackQuery, state: FSMContext):
     await call.answer()
     value = get_settings().vote_url or "не задана"
     await cast(Any, msg).answer(
-        f"Введите новую ссылку «Проголосовать».\nСейчас: {html.escape(value)}",
+        f"Введите новую ссылку «Проголосовать».\nСейчас: {html.escape(value)}\n\n"
+        "Чтобы бот видел, кто проголосовал, и платил за голос, укажите ссылку на буст канала:\n"
+        "https://t.me/boost/restojobs\n"
+        "Бот должен быть администратором этого канала.",
         reply_markup=cancel_kb,
+        disable_web_page_preview=True,
     )
     await state.set_state(AdminFlow.set_url)
 
@@ -247,9 +283,14 @@ async def update_url(message: types.Message, state: FSMContext):
         return
     old_value = await set_setting("url", text, user.id)
     await record_setting_change(user.id, "url", old_value, text)
+    note = (
+        "\n\n🚀 Это ссылка на буст канала: бот будет платить за голос один раз."
+        if boost_target(text) is not None
+        else "\n\n⚠️ Это не ссылка на буст — бот не узнает, кто проголосовал, и не заплатит."
+    )
     await message.answer(
-        f"✅ Ссылка «Проголосовать» обновлена: <a href='{text}'>{text}</a>",
-        parse_mode="HTML", reply_markup=settings_kb(),
+        f"✅ Ссылка «Проголосовать» обновлена: {html.escape(text)}{note}",
+        parse_mode="HTML", reply_markup=settings_kb(), disable_web_page_preview=True,
     )
     await state.clear()
 

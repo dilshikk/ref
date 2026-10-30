@@ -18,6 +18,18 @@ from utils.payment_details import EncryptionConfigError, ensure_encryption_confi
 # вывод средств или настройка в админке больше не теряются (раньше — MemoryStorage)
 fsm_storage = PostgresStorage(db)
 
+# Какие события запрашиваем у Telegram. chat_boost / removed_chat_boost — голоса (бусты)
+# за канал по ссылке «Проголосовать»: без них бот не узнает, кто проголосовал.
+ALLOWED_UPDATES = [
+    "message",
+    "callback_query",
+    "chat_member",
+    "my_chat_member",
+    "poll_answer",
+    "chat_boost",
+    "removed_chat_boost",
+]
+
 
 def _is_network_resolution_error(error: Exception) -> bool:
     message = str(error).lower()
@@ -87,8 +99,10 @@ async def database_connected() -> None:
     await db.create_table_broadcast_send_logs()
     await db.create_table_poll_instances()
     await db.create_table_poll_vote_answers()
-    # Кому уже выдана награда за голос (одна на пользователя и вопрос)
+    # Старые награды за голос в опросе (сейчас не начисляются, таблица нужна для отчётов)
     await db.create_table_poll_vote_rewards()
+    # Кому выдана награда за голос (буст) канала — одна на человека
+    await db.create_table_boost_rewards()
     # Кто кого добавил в группу вручную: один человек засчитывается один раз
     await db.create_table_group_manual_adds()
     # Вступления сверх антифрод-лимита ждут решения админа, а не теряются
@@ -238,7 +252,7 @@ async def run_polling() -> None:
     try:
         await dispatcher.start_polling(
             bot,
-            allowed_updates=["message", "callback_query", "chat_member", "my_chat_member", "poll_answer"],
+            allowed_updates=ALLOWED_UPDATES,
             close_bot_session=False,  # сессия нужна, чтобы после падения успеть сообщить админу
         )
     except Exception as e:
