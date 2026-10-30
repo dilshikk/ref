@@ -14,6 +14,7 @@
 - реквизиты выплат шифруются при записи и расшифровываются при чтении (#20).
 - add_payout_request: «одна заявка в ожидании» и «одна заявка в сутки» проверяются
   в том же SQL, что и вставка, плюс уникальный индекс в БД (#47).
+  Финансовому админу правило «раз в сутки» не применяется (allow_repeat_today).
 - имя держателя карты сохраняется в заявке (зашифрованным), чтобы после выплаты
   можно было проверить, на чьё имя переводили (#51).
 """
@@ -405,10 +406,13 @@ class ReferralDatabase(SafeDatabase):
         card_number: str,
         amount: float,
         card_holder: str | None = None,
+        allow_repeat_today: bool = False,
     ) -> int | None:
         """
         Создаёт заявку и возвращает её ID или None, если у пользователя уже есть
         заявка в ожидании или заявка за последние 24 часа.
+        allow_repeat_today=True (финансовый админ) снимает правило «раз в сутки»,
+        но одна заявка в ожидании — по-прежнему одна (уникальный индекс).
         Правило «раз в сутки» проверяется в том же запросе, что и вставка, а две
         одновременные вставки (второй экземпляр бота, двойное нажатие) упираются
         в уникальный индекс uq_payout_pending_user — ON CONFLICT DO NOTHING.
@@ -420,7 +424,10 @@ class ReferralDatabase(SafeDatabase):
             WHERE NOT EXISTS (
                 SELECT 1 FROM PayoutRequests
                 WHERE user_id = $1
-                  AND (status = 'pending' OR created_at >= NOW() - INTERVAL '24 hours')
+                  AND (
+                      status = 'pending'
+                      OR (NOT CAST($7 AS BOOLEAN) AND created_at >= NOW() - INTERVAL '24 hours')
+                  )
             )
             ON CONFLICT DO NOTHING
             RETURNING id
@@ -432,6 +439,7 @@ class ReferralDatabase(SafeDatabase):
                 payment_details.encrypt(card_number),
                 amount,
                 payment_details.encrypt(card_holder) if card_holder else None,
+                bool(allow_repeat_today),
             ),
             fetchone=True,
         )
