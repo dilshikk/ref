@@ -7,7 +7,7 @@ from loguru import logger
 from filters import private_only
 from data.settings import get_settings, is_http_url
 from loader import db, bot                        # ✅ исправлен импорт
-from services.invite import ensure_invite_link    # ✅ отдельная строка
+from services.invite import GroupNotConfiguredError, ensure_invite_link
 from utils.invited_list import INVITED_LIST_LIMIT, format_invited_lines
 
 router = private_only(Router(name="private.referrals"))
@@ -27,6 +27,13 @@ async def referral_link(message: types.Message) -> None:
 
     try:
         link = await ensure_invite_link(bot, user_id)
+    except GroupNotConfiguredError:
+        # #116: группу ещё не указали в админке — объясняем, а не «попробуйте позже»
+        await message.answer(
+            "⏳ Реферальные ссылки пока недоступны: администратор ещё не настроил группу. "
+            "Загляните чуть позже."
+        )
+        return
     except Exception as e:
         logger.error(f"referral_link — не удалось получить инвайт [user={user_id}]: {e}")
         await message.answer("⚠️ Не удалось сформировать ссылку. Попробуйте позже.")
