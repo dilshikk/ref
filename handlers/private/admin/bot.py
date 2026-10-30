@@ -1,7 +1,11 @@
 # handlers/private/admin/bot.py
-"""🤖 Бот: тексты, опросы, ссылка голосования, реферальные настройки, команды меню.
-Заглушки «🏠 Главное меню», «🌍 Языки», «📢 Уведомления» удалены (#87, #89, #90):
-их кнопок нет ни на одной клавиатуре."""
+"""Часть «⚙️ Настройки»: тексты, опрос со ссылкой «Проголосовать», команды меню.
+
+Раздел «🤖 Бот» убран из главного меню: в нём лежали реферальные награды и лимиты,
+которые повторяли «💰 Тарифы» и «📊 Лимиты». Числа теперь меняются только в
+settings.py, а ссылка «Проголосовать» — только здесь, рядом с опросом
+(раньше она была ещё и в «⚙️ Настройки каналов»).
+"""
 import html
 from typing import Any, cast
 from aiogram import Router, types, F
@@ -9,8 +13,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from filters import private_only
 from keyboards.reply_keyboards import (
-    bot_kb,
     bot_menu_settings_kb,
+    settings_kb,
 )
 from loader import db
 from states.flows import AdminFlow
@@ -32,16 +36,6 @@ TEMPLATE_PLACES: dict[str, str] = {
     "help": "ответ на /help",
     "support": "текст после кнопки «📞 Поддержка»",
 }
-
-
-@router.message(F.text == "🤖 Бот", IsBotAdminFilter(ADMINS))
-async def bot_menu(message: types.Message):
-    await message.answer(
-        "🤖 <b>Бот</b>\n\n"
-        "Команды и служебные настройки бота.",
-        parse_mode="HTML",
-        reply_markup=bot_kb(),
-    )
 
 
 def _texts_overview() -> str:
@@ -130,137 +124,19 @@ async def update_text_template(message: types.Message, state: FSMContext):
         else f"✅ Шаблон <code>{key}</code> обновлён и уже действует.\n\n"
         f"Новое значение:\n<code>{html.escape(short_text(value, 300))}</code>"
     )
-    await message.answer(result, parse_mode="HTML", reply_markup=bot_kb())
+    await message.answer(result, parse_mode="HTML", reply_markup=settings_kb())
     await state.clear()
 
 
 # ─────────────────────────────────────────────
-# 🎁 Реферальные настройки (#85): раньше только показ, теперь инлайн-панель
-# по образцу «💰 Тарифы». Ключи совпадают с полями Settings и ключами bot_settings.
+# 🗳 Опрос и ссылка «Проголосовать» — в одном месте
 # ─────────────────────────────────────────────
-_REFERRAL_FIELDS: dict[str, dict[str, Any]] = {
-    "invited_credit": {"label": "Сумма за приглашение", "unit": "сум", "minimum": 0},
-    "antispam_referral_limit": {"label": "Лимит в час", "unit": "чел.", "minimum": 1},
-    "antispam_referral_daily_limit": {"label": "Лимит в сутки", "unit": "чел.", "minimum": 1},
-    "referral_hold_hours": {"label": "Снятие при выходе в течение", "unit": "ч.", "minimum": 0},
-}
+_vote_url_kb = InlineKeyboardMarkup(
+    inline_keyboard=[[InlineKeyboardButton(text="🔗 Изменить ссылку «Проголосовать»", callback_data="yes_url")]]
+)
 
 
-def _referral_value(key: str) -> int:
-    return int(getattr(get_settings(), key))
-
-
-def _referral_text() -> str:
-    lines = [
-        f"{field['label']}: <b>{_referral_value(key)}</b> {field['unit']}"
-        for key, field in _REFERRAL_FIELDS.items()
-    ]
-    return (
-        "🎁 <b>Реферальные настройки</b>\n\n"
-        + "\n".join(lines)
-        + "\n\nВступления сверх лимита не теряются — они ждут решения в «⏸ На удержании».\n"
-        "«Снятие при выходе»: 0 — начисление снимается при любом выходе из группы.\n\n"
-        "Выберите параметр и отправьте новое число."
-    )
-
-
-def _referral_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"✏️ {field['label']}", callback_data=f"ref_edit:{key}")]
-        for key, field in _REFERRAL_FIELDS.items()
-    ])
-
-
-def _referral_cancel_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="ref_edit_cancel")]]
-    )
-
-
-@router.message(F.text == "🎁 Реферальные настройки", IsBotAdminFilter(ADMINS))
-async def bot_referral_menu(message: types.Message):
-    # Кнопка есть и в «🤖 Бот», и в «⚙️ Настройки»: reply-клавиатуру не меняем,
-    # чтобы админ остался в том разделе, откуда пришёл.
-    await message.answer(_referral_text(), parse_mode="HTML", reply_markup=_referral_kb())
-
-
-@router.callback_query(F.data.startswith("ref_edit:"), IsBotAdminFilter(ADMINS))
-async def ref_edit_callback(call: types.CallbackQuery, state: FSMContext):
-    if call.message is None or not call.data:
-        return
-    key = call.data.split(":", 1)[1]
-    field = _REFERRAL_FIELDS.get(key)
-    if field is None:
-        await call.answer("Неизвестный параметр")
-        return
-    await state.update_data(
-        referral_key=key,
-        referral_panel_chat_id=call.message.chat.id,
-        referral_panel_message_id=call.message.message_id,
-    )
-    await state.set_state(AdminFlow.set_referral_value)
-    await cast(Any, call.message).answer(
-        f"Введите новое значение для «{field['label']}» (целое число, не меньше {field['minimum']}).\n"
-        f"Сейчас: <b>{_referral_value(key)}</b>",
-        parse_mode="HTML",
-        reply_markup=_referral_cancel_kb(),
-    )
-    await call.answer()
-
-
-@router.callback_query(F.data == "ref_edit_cancel", IsBotAdminFilter(ADMINS))
-async def ref_edit_cancel(call: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    if call.message is not None:
-        await cast(Any, call.message).edit_reply_markup(reply_markup=None)
-    await call.answer("Редактирование отменено")
-
-
-@forms_router.message(AdminFlow.set_referral_value, IsBotAdminFilter(ADMINS))
-async def ref_value_input(message: types.Message, state: FSMContext):
-    user = message.from_user
-    if user is None:
-        return
-    data = await state.get_data()
-    key = str(data.get("referral_key") or "")
-    field = _REFERRAL_FIELDS.get(key)
-    if field is None:
-        await message.answer("⚠️ Сессия истекла. Откройте «🎁 Реферальные настройки» снова.")
-        await state.clear()
-        return
-
-    raw = (message.text or "").strip()
-    if not raw.isdigit() or int(raw) < int(field["minimum"]):
-        await message.answer(
-            f"❌ Введите целое число не меньше {field['minimum']}.",
-            reply_markup=_referral_cancel_kb(),
-        )
-        return
-
-    value = int(raw)
-    old_value = await set_setting(key, value, user.id)
-    await record_setting_change(user.id, key, old_value, value)
-
-    # Обновляем исходную панель, чтобы админ сразу видел новое значение
-    chat_id = data.get("referral_panel_chat_id")
-    message_id = data.get("referral_panel_message_id")
-    if message.bot is not None and isinstance(chat_id, int) and isinstance(message_id, int):
-        try:
-            await message.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=_referral_text(),
-                parse_mode="HTML",
-                reply_markup=_referral_kb(),
-            )
-        except Exception:
-            await message.answer(_referral_text(), parse_mode="HTML", reply_markup=_referral_kb())
-
-    await message.answer(f"✅ {field['label']}: <b>{value}</b> {field['unit']}", parse_mode="HTML")
-    await state.clear()
-
-
-@router.message(F.text == "🗳 Опросы", IsBotAdminFilter(ADMINS))
+@router.message(F.text == "🗳 Опрос", IsBotAdminFilter(ADMINS))
 async def bot_polls_menu(message: types.Message, state: FSMContext):
     # Вопрос и варианты разбирает get_settings() — та же логика, что при рассылке
     # опроса. Раньше здесь была своя копия разбора с отдельными умолчаниями (#49).
@@ -274,18 +150,25 @@ async def bot_polls_menu(message: types.Message, state: FSMContext):
     counts = {int(row.get("option_index") or 0): int(row.get("votes") or 0) for row in option_rows}
 
     lines = [
-        f"{idx + 1}) {opt} — <b>{counts.get(idx, 0)}</b>"
+        f"{idx + 1}) {html.escape(opt)} — <b>{counts.get(idx, 0)}</b>"
         for idx, opt in enumerate(options)
     ]
+    vote_url = settings.vote_url or "не задана"
 
     await message.answer(
-        "🗳 <b>Опросы</b>\n\n"
-        f"Текущий вопрос:\n<b>{question}</b>\n\n"
+        "🗳 <b>Опрос</b>\n\n"
+        f"Текущий вопрос:\n<b>{html.escape(question)}</b>\n\n"
         "Варианты и голоса:\n"
         + "\n".join(lines)
         + "\n\n"
         f"Уникальных голосовавших: <b>{voters}</b>\n"
         f"Опрос отправлен пользователям: <b>{polls_sent}</b> раз\n\n"
+        "🔗 Ссылка «Проголосовать» (бот показывает её, когда не понял сообщение):\n"
+        f"<code>{html.escape(vote_url)}</code>",
+        parse_mode="HTML",
+        reply_markup=_vote_url_kb,
+    )
+    await message.answer(
         "Чтобы изменить опрос, отправьте одной строкой:\n"
         "<code>Вопрос | Вариант 1 | Вариант 2 | Вариант 3</code>",
         parse_mode="HTML",
@@ -330,19 +213,54 @@ async def update_poll_config(message: types.Message, state: FSMContext):
 
     await message.answer(
         "✅ Опрос обновлен.\n\n"
-        f"Вопрос: <b>{question}</b>\n"
+        f"Вопрос: <b>{html.escape(question)}</b>\n"
         "Варианты:\n"
-        + "\n".join([f"{idx + 1}) {opt}" for idx, opt in enumerate(options)]),
+        + "\n".join([f"{idx + 1}) {html.escape(opt)}" for idx, opt in enumerate(options)]),
         parse_mode="HTML",
-        reply_markup=bot_kb(),
+        reply_markup=settings_kb(),
     )
     await state.clear()
 
 
-@router.message(F.text.in_({"⚙ Меню бота", "⚙️ Меню бота"}), IsBotAdminFilter(ADMINS))
+@router.callback_query(F.data == "yes_url", IsBotAdminFilter(ADMINS))
+async def confirm_url_edit(call: types.CallbackQuery, state: FSMContext):
+    msg = call.message
+    if msg is None:
+        return
+    await call.answer()
+    value = get_settings().vote_url or "не задана"
+    await cast(Any, msg).answer(
+        f"Введите новую ссылку «Проголосовать».\nСейчас: {html.escape(value)}",
+        reply_markup=cancel_kb,
+    )
+    await state.set_state(AdminFlow.set_url)
+
+
+@forms_router.message(AdminFlow.set_url, IsBotAdminFilter(ADMINS))
+async def update_url(message: types.Message, state: FSMContext):
+    user = message.from_user
+    if user is None:
+        return
+    text = (message.text or "").strip()
+    if not text.startswith("http"):
+        await message.answer("❌ Введите корректную ссылку (начиная с http или https):", parse_mode="HTML")
+        return
+    old_value = await set_setting("url", text, user.id)
+    await record_setting_change(user.id, "url", old_value, text)
+    await message.answer(
+        f"✅ Ссылка «Проголосовать» обновлена: <a href='{text}'>{text}</a>",
+        parse_mode="HTML", reply_markup=settings_kb(),
+    )
+    await state.clear()
+
+
+# ─────────────────────────────────────────────
+# ⚙ Команды меню
+# ─────────────────────────────────────────────
+@router.message(F.text == "⚙ Команды меню", IsBotAdminFilter(ADMINS))
 async def bot_menu_settings(message: types.Message):
     await message.answer(
-        "⚙ <b>Меню бота</b>\n\n"
+        "⚙ <b>Команды меню</b>\n\n"
         "Здесь можно посмотреть и обновить команды для пользователей и админов.",
         parse_mode="HTML",
         reply_markup=bot_menu_settings_kb(),

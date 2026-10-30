@@ -319,7 +319,7 @@ async def payout_finalize_with_receipt(message: types.Message, state: FSMContext
     else:
         await message.answer(
             "✅ Выплата подтверждена.\n"
-            "⚠️ Отчет в группу не отправлен: задайте чат отчётов в «💰 Финансы» → «🆔 Чат выплат».",
+            "⚠️ Отчет в группу не отправлен: задайте чат отчётов в «⚙️ Настройки» → «🆔 Чат выплат».",
             reply_markup=finance_kb(),
         )
     await state.clear()

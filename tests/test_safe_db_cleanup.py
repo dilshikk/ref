@@ -11,11 +11,14 @@ ROOT = Path(__file__).resolve().parent.parent
 SAFE_DB = ROOT / "utils" / "db" / "safe_db.py"
 REFERRAL_DB = ROOT / "utils" / "db" / "referral_db.py"
 
-# Админ-экраны, которые раньше показывали сырые url_yaml.get(...) вместо реальных значений
+# Админ-экраны, которые раньше показывали сырые url_yaml.get(...) вместо реальных значений.
+# security.py удалён (его настройки теперь в settings.py), группы — в channels.py,
+# денежные админы — в users.py.
 ADMIN_SCREENS = [
     ROOT / "handlers" / "private" / "admin" / "finance.py",
     ROOT / "handlers" / "private" / "admin" / "settings.py",
-    ROOT / "handlers" / "private" / "admin" / "security.py",
+    ROOT / "handlers" / "private" / "admin" / "channels.py",
+    ROOT / "handlers" / "private" / "admin" / "users.py",
     ROOT / "handlers" / "private" / "admin" / "bot.py",
 ]
 # Числовые настройки: показывать их нужно только через get_settings()
@@ -80,5 +83,6 @@ def test_admin_screens_show_numbers_from_get_settings():
     # url_yaml.get("ключ") без умолчания допустим — это old_value для аудита.
     # Со своим умолчанием — это показ админу, и он расходился с тем, что делает бот.
     for path in ADMIN_SCREENS:
+        assert path.exists(), f"{path} не найден — обновите ADMIN_SCREENS"
         bad = _get_calls_with_default(path) & NUMERIC_KEYS
         assert not bad, f"{path.name}: числовые настройки читаются в обход get_settings(): {sorted(bad)}"

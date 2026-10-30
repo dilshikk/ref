@@ -1,6 +1,7 @@
 # handlers/private/admin/stats.py
-"""📊 Статистика: общая сводка, новые пользователи, активность, периоды.
-Заглушки «📢 Каналы» и «💳 Финансы» заменены настоящими данными (#73, #84)."""
+"""📊 Статистика: только просмотр — общая сводка, новые пользователи, активность, периоды.
+Заглушки «📢 Каналы» и «💳 Финансы» заменены настоящими данными (#73, #84).
+Топ пригласивших перенесён сюда из «👥 Пользователи» → «🎁 Рефералы» (был дублем)."""
 import html
 from typing import Any, cast
 from aiogram import Router, types, F
@@ -21,6 +22,8 @@ from .common import (
 )
 
 router = private_only(Router(name="private.admin.stats"))
+
+TOP_REFERRERS_LIMIT = 10
 
 
 async def _show_main_section(message: types.Message, text: str, keyboard: ReplyKeyboardMarkup) -> None:
@@ -120,7 +123,7 @@ async def stats_channels(message: types.Message):
     if not channels:
         body = (
             "Обязательные каналы не добавлены.\n"
-            "Добавить: «📢 Каналы и группы» → «📌 Подписки»."
+            "Добавить: «📢 Каналы и группы» → «📌 Обязательные подписки»."
         )
     else:
         lines = [
@@ -161,12 +164,22 @@ async def stats_referrals(message: types.Message):
     referrals = await get_referral_totals()
     on_hold = await _count("SELECT COUNT(*) AS count FROM referral_holds WHERE status = 'pending'")
     reversed_count = await _count("SELECT COUNT(*) AS count FROM UserInviteMember WHERE reversed_at IS NOT NULL")
+    top = cast(list[dict[str, Any]], await db.get_top_referrals(limit=TOP_REFERRERS_LIMIT) or [])
+    top_lines = [
+        f"{index}. <b>{html.escape(row['full_name'] or '—')}</b> — <b>{row['history_count']}</b>"
+        for index, row in enumerate(top, start=1)
+    ]
+    top_text = (
+        f"\n\n🏆 <b>Топ-{TOP_REFERRERS_LIMIT} пригласивших</b>\n" + "\n".join(top_lines)
+        if top_lines else "\n\nРефералов пока нет."
+    )
     await message.answer(
         "🎁 <b>Реферальная статистика</b>\n\n"
         f"Всего приглашений: <b>{referrals['total_referrals']}</b>\n"
         f"Текущий активный счётчик: <b>{referrals['current_referrals']}</b>\n"
         f"⏸ На удержании (ждут решения): <b>{on_hold}</b>\n"
-        f"↩️ Снято за выход из группы: <b>{reversed_count}</b>",
+        f"↩️ Снято за выход из группы: <b>{reversed_count}</b>"
+        f"{top_text}",
         parse_mode="HTML",
         reply_markup=stats_kb(),
     )

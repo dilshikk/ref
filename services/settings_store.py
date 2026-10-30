@@ -25,7 +25,9 @@ _ROOT = Path(__file__).resolve().parent.parent
 # Где искала url.yml старая версия бота. Используется только для разового переноса.
 _LEGACY_YAML_PATHS = (_ROOT / "config" / "url.yml", _ROOT / "data" / "url.yml")
 
-GROUP_NOT_SET_TEXT = "⚠️ ID группы не задан. Укажите его в «⚙️ Настройки каналов» → «🆔 ID группы»."
+GROUP_NOT_SET_TEXT = (
+    "⚠️ ID группы не задан. Укажите его в «📢 Каналы и группы» → «👥 Группа приглашений» → «🆔 ID группы»."
+)
 
 
 def _legacy_yaml_path() -> Path | None:
@@ -94,6 +96,6 @@ def setup_problems() -> list[str]:
     if not settings.money_admins:
         problems.append(
             "⚠️ Не назначены денежные админы: одобрять выплаты некому. "
-            "Укажите их в «💰 Финансы» → «👑 Денежные админы»."
+            "Укажите их в «👥 Пользователи» → «👑 Администраторы»."
         )
     return problems

@@ -1,14 +1,18 @@
 """#108: у каждой кнопки reply-клавиатур, которые показывает бот, есть обработчик.
+И ни одна кнопка админки не повторяется в двух разделах.
 Только разбор исходников (ast), без импорта aiogram и настроек бота.
 Запуск: python -m pytest tests"""
 import ast
 import re
+from collections import Counter
 
 from _load import ROOT
 
 KEYBOARDS_DIR = ROOT / "keyboards" / "reply_keyboards"
 ADMIN_KEYBOARDS = KEYBOARDS_DIR / "admin_menu.py"
 HANDLERS_DIR = ROOT / "handlers"
+# Кнопки навигации законно стоят в нескольких меню
+NAVIGATION_BUTTONS = {"⬅️ Назад", "⬅️ К каналам", "⬅️ К настройкам"}
 
 
 def _strings(node: ast.AST) -> set[str]:
@@ -94,7 +98,9 @@ def test_keyboards_are_parsed():
     kbs = _keyboards(sorted(KEYBOARDS_DIR.glob("*.py")))
     assert "👤 Меню пользователя" in kbs["reply_keyboard_for_admin"]
     assert "💰 Баланс" in kbs["menu_kb"]
-    assert "⏸ На удержании" in _handled_texts(_handler_sources())
+    handled = _handled_texts(_handler_sources())
+    assert "⏸ На удержании" in handled
+    assert "💸 Выплаты" in handled  # кнопка панели из константы _PANEL_BY_BUTTON
 
 
 def test_every_shown_button_has_handler():
@@ -115,3 +121,18 @@ def test_every_admin_keyboard_is_shown():
     all_sources = "\n".join(_handler_sources().values())
     unused = [kb for kb in _keyboards([ADMIN_KEYBOARDS]) if not _is_used(kb, all_sources)]
     assert unused == []
+
+
+def test_no_admin_button_is_repeated_in_two_sections():
+    # «💰 Тарифы» были и в «Финансах», и в «Настройках», «🎁 Реферальные настройки» —
+    # в «Боте» и в «Настройках»: админ не понимал, где правильное место
+    counts = Counter(text for texts in _keyboards([ADMIN_KEYBOARDS]).values() for text in texts)
+    repeated = sorted(text for text, count in counts.items() if count > 1 and text not in NAVIGATION_BUTTONS)
+    assert repeated == []
+
+
+def test_main_menu_has_no_duplicate_sections():
+    main = _keyboards([ADMIN_KEYBOARDS])["reply_keyboard_for_admin"]
+    assert "🤖 Бот" not in main
+    assert "🔒 Безопасность" not in main
+    assert {"⚙️ Настройки", "💰 Финансы", "👥 Пользователи", "📢 Каналы и группы"} <= main
