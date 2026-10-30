@@ -7,10 +7,11 @@ from collections import Counter
 from _load import ROOT
 
 ADMIN_DIR = ROOT / "handlers" / "private" / "admin"
-# finance_reports (#68, #71, #72) — сразу после finance: «💳 Балансы», «📊 Отчёты», «🎁 Бонусы»
+# finance_reports (#68, #71, #72) — сразу после finance: «💳 Балансы», «📊 Отчёты», «🎁 Бонусы».
+# security убран: его настройки повторяли «⚙️ Настройки» и «👥 Пользователи».
 SECTIONS = [
     "menu", "stats", "finance", "finance_reports", "users", "channels",
-    "bot", "broadcasts", "settings", "security", "logs",
+    "bot", "broadcasts", "settings", "logs",
 ]
 
 
@@ -57,7 +58,7 @@ def test_button_texts_are_not_duplicated_between_sections():
     texts = Counter()
     for _, _, _, event, first in _handlers():
         if event == "message":
-            texts.update(re.findall(r'"([^"]+)"', first))
+            texts.update(re.findall(r"['\"]([^'\"]+)['\"]", first))
     assert [t for t, c in texts.items() if c > 1] == []
 
 
