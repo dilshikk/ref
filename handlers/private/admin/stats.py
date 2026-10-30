@@ -5,6 +5,7 @@
 import html
 from typing import Any, cast
 from aiogram import Router, types, F
+from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup
 from filters import private_only
 from keyboards.reply_keyboards import stats_kb
@@ -58,6 +59,13 @@ async def stats_menu(message: types.Message):
         f"Вернувшиеся сегодня: <b>{activity['returning_today']}</b>",
         stats_kb(),
     )
+
+
+# Команда /stats из меню админа (utils/bot_commands.py). Раньше обработчика не было,
+# и команда уходила в fallback («Оставьте свой голос»).
+@router.message(Command("stats"), IsBotAdminFilter(ADMINS))
+async def stats_command(message: types.Message):
+    await stats_menu(message)
 
 
 @router.message(F.text == "👥 Новые пользователи", IsBotAdminFilter(ADMINS))

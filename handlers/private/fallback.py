@@ -17,6 +17,7 @@ from loader import db
 router = private_only(Router(name="private.fallback"))
 
 _THANKS = "Спасибо за голос! Ваше мнение помогает улучшать бота."
+_UNKNOWN_COMMAND = "Неизвестная команда. Список команд — /help"
 
 
 def _poll_config() -> tuple[str, list[str]]:
@@ -67,6 +68,12 @@ async def poll_answer_handler(poll_answer: types.PollAnswer, bot: Bot) -> None:
         await bot.send_message(user.id, _THANKS)
     except Exception as e:
         logger.warning(f"Не удалось поблагодарить за голос user={user.id}: {e}")
+
+
+# Незнакомая команда (/что-то) — не реклама голоса, а подсказка про /help
+@router.message(F.text.startswith("/"))
+async def unknown_command(message: types.Message) -> None:
+    await message.answer(_UNKNOWN_COMMAND)
 
 
 @router.message()
