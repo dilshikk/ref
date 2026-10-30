@@ -9,7 +9,6 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # Отдельный пользователь без прав администратора.
-# UID 1000 фиксирован, чтобы на сервере можно было выдать ему права на url.yml
 RUN groupadd --gid 1000 bot \
     && useradd --uid 1000 --gid bot --no-create-home --shell /usr/sbin/nologin bot
 
@@ -17,7 +16,7 @@ RUN groupadd --gid 1000 bot \
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-# Код (секреты и url.yml исключены через .dockerignore)
+# Код (секреты исключены через .dockerignore)
 COPY --chown=bot:bot . .
 
 USER bot
