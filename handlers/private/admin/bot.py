@@ -373,7 +373,9 @@ async def refresh_bot_menu(message: types.Message):
     if bot is None:
         await message.answer("⚠️ Не удалось обновить меню: bot недоступен.")
         return
-    await set_all_commands(bot)
+    # Тот же вызов, что при запуске бота: без списка админов команды /admin,
+    # /stats и /holds не появились бы у админов в меню.
+    await set_all_commands(bot, admin_ids=ADMINS)
     await message.answer(
         "✅ <b>Меню бота обновлено</b>\n\n"
         "Команды пользователей и админов синхронизированы.",
