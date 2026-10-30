@@ -150,7 +150,8 @@ async def _start_send_message(message: types.Message, state: FSMContext, telegra
     )
 
 
-@router.message(UserManagementFlow.search_input, IsBotAdminFilter(ADMINS))
+# Команды (/start, /help, /uid…) во время поиска не считаются запросом — идут своим обработчикам
+@router.message(UserManagementFlow.search_input, ~F.text.startswith("/"), IsBotAdminFilter(ADMINS))
 async def search_process(message: types.Message, state: FSMContext) -> None:
     # search_purpose задают кнопки «💰 Изменить баланс» / «📨 Отправить сообщение» (#76, #77)
     if not message.text:
@@ -162,7 +163,8 @@ async def search_process(message: types.Message, state: FSMContext) -> None:
     users = await db.search_users(query)
 
     # Поиск остаётся открытым: следующий текст админа — новый запрос.
-    # Раньше форма закрывалась, и повторный запрос уходил в fallback.
+    # Раньше форма закрывалась, и повторный запрос уходил в fallback
+    # («Оставьте свой голос👇» вместо результатов).
     if not users:
         await message.answer("❌ Пользователь не найден. Введите другой запрос:")
         return
