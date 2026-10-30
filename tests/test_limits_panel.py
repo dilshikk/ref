@@ -11,7 +11,7 @@ ADMIN_DIR = ROOT / "handlers" / "private" / "admin"
 SETTINGS_HANDLERS = ADMIN_DIR / "settings.py"
 NUMERIC_KEYS = {
     "min_balance", "max_withdraw", "group_member_count",
-    "invited_credit", "vote_credit",
+    "invited_credit", "boost_credit", "boost_hold_hours",
     "antispam_referral_limit", "antispam_referral_daily_limit",
     "referral_hold_hours", "add_min_hours", "add_min_score",
 }
@@ -73,6 +73,12 @@ def test_panel_keys_are_known_settings():
     known = _setting_keys()
     assert known, "SETTING_KEYS не разобран"
     assert set(_fields()) <= known
+
+
+def test_in_bot_poll_reward_is_gone():
+    # Голос в опросе внутри бота больше не оплачивается
+    assert "vote_credit" not in _fields()
+    assert "vote_credit" not in _setting_keys()
 
 
 def test_every_panel_is_described_and_has_button():
