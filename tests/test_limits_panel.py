@@ -13,8 +13,10 @@ NUMERIC_KEYS = {
     "min_balance", "max_withdraw", "group_member_count",
     "invited_credit", "boost_credit", "boost_hold_hours",
     "antispam_referral_limit", "antispam_referral_daily_limit",
-    "referral_hold_hours", "add_min_hours", "add_min_score",
+    "referral_hold_hours",
 }
+# Проверка «24 ч. + активность» добавленных убрана: её настроек в админке быть не должно
+REMOVED_KEYS = {"add_min_hours", "add_min_score"}
 # Старые панели-дубли: их не должно быть нигде в админке
 REMOVED_PANELS = {"_LIMIT_FIELDS", "_REFERRAL_FIELDS", "_TARIFF_FIELDS"}
 
@@ -66,6 +68,10 @@ def _setting_keys() -> set[str]:
 def test_every_number_has_a_panel():
     # Раньше часть лимитов менялась только правкой url.yml на сервере (#92)
     assert NUMERIC_KEYS <= set(_fields())
+
+
+def test_added_member_check_settings_are_gone():
+    assert not REMOVED_KEYS & set(_fields())
 
 
 def test_panel_keys_are_known_settings():
