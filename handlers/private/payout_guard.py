@@ -14,12 +14,13 @@
 - выплата не одобряется, если баланс пользователя за вычетом денег «на проверке»
   (#46) стал меньше суммы заявки или число добавленных участников стало меньше
   нормы. Проверка идёт в том же SQL, что и списание, — атомарно.
-- одобрять/отклонять выплаты может только MONEY_ADMINS (#23); остальным админам
-  отвечает money_guard.
+- одобрять/отклонять выплаты может только денежный админ (#23); остальным админам
+  отвечает money_guard. Список денежных админов и ID группы берутся из
+  bot_settings (#116) при каждом действии — изменения из админки действуют сразу.
 - отчёт о выплате отправляется через services/payouts.py, а не через
   внутренние функции admin_panel (#36).
 - список «💰 Заявки на выплаты» перехватывается здесь: полный номер карты видит
-  только MONEY_ADMINS, остальные админы — маску ****1234 (#20).
+  только денежный админ, остальные админы — маску ****1234 (#20).
 """
 import html
 from typing import Any, cast
@@ -29,14 +30,15 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.context import FSMContext
 from loguru import logger
 
-from data.config import ADMINS, GROUP_ID, MONEY_ADMINS
+from data.config import ADMINS
 from data.settings import get_settings
 from filters import private_only
-from filters.admin import IsAdminWithoutMoneyRights, IsBotAdminFilter, IsMoneyAdmin
+from filters.admin import IsAdminWithoutMoneyRights, IsBotAdminFilter, IsMoneyAdmin, is_money_admin
 from keyboards.reply_keyboards import finance_kb
 from loader import db
 from services.group_adds import qualification_enabled
 from services.payouts import send_payout_report
+from services.settings_store import GROUP_NOT_SET_TEXT
 from states.flows import AdminFlow
 from utils import payment_details
 from utils.payout_math import approval_rejection_reasons, credits_for_amount
@@ -81,13 +83,13 @@ def _parse_req_id(data: str) -> int | None:
     return int(parts[2])
 
 
-# Денежные кнопки, которые может нажимать только MONEY_ADMINS (#23).
+# Денежные кнопки, которые может нажимать только денежный админ (#23).
 _MONEY_CALLBACK_PREFIXES = ("approved_", "rejected_", "umgmt_addbal_", "umgmt_reset_", "umgmt_resetok_", "hold_ok_", "hold_no_")
 
 
 @router.message(F.text == "💰 Заявки на выплаты", IsBotAdminFilter(ADMINS))
 async def list_payouts(message: types.Message) -> None:
-    """Список заявок: реквизиты полностью — только MONEY_ADMINS, остальным маска (#20)."""
+    """Список заявок: реквизиты полностью — только денежному админу, остальным маска (#20)."""
     payouts = cast(list[dict[str, Any]], await db.get_pending_payouts() or [])
     if not payouts:
         await message.answer("✅ Нет активных заявок на выплату.")
@@ -96,7 +98,7 @@ async def list_payouts(message: types.Message) -> None:
     await message.answer(f"💸 <b>Заявок на выплату: {len(payouts)}</b>", parse_mode="HTML")
 
     viewer_id = message.from_user.id if message.from_user else 0
-    show_full = viewer_id in MONEY_ADMINS
+    show_full = is_money_admin(viewer_id)
 
     for req in payouts:
         card = str(req.get("card_number") or "")
@@ -123,7 +125,7 @@ async def money_guard(call: types.CallbackQuery) -> None:
     Обычный админ нажал денежную кнопку — сразу отвечаем понятным отказом,
     а не молчанием (сами денежные обработчики требуют IsMoneyAdmin).
     """
-    logger.warning(f"Админ {call.from_user.id} без прав MONEY_ADMIN нажал «{call.data}»")
+    logger.warning(f"Админ {call.from_user.id} без прав денежного админа нажал «{call.data}»")
     await call.answer("⛔ Выплаты и балансы может менять только финансовый администратор.", show_alert=True)
 
 
@@ -240,9 +242,17 @@ async def payout_finalize_with_receipt(message: types.Message, state: FSMContext
         await state.clear()
         return
 
+    settings = get_settings()
+    group_id = settings.group_id
+    # Без группы нельзя проверить норму «добавил N участников» — не одобряем вслепую.
+    # Заявка остаётся в ожидании, админ одобрит её после того, как укажет группу.
+    if group_id is None:
+        await state.clear()
+        await message.answer(GROUP_NOT_SET_TEXT, reply_markup=finance_kb())
+        return
+
     # Списываем только выплаченную сумму (в рефералах, с округлением вверх),
     # а не обнуляем весь баланс: остаток и новые рефералы сохраняются.
-    settings = get_settings()
     amount = int(payout_row.get("amount") or 0)
     credits_to_deduct = credits_for_amount(amount, settings.invited_credit)
     required_members = settings.group_member_count
@@ -257,7 +267,7 @@ async def payout_finalize_with_receipt(message: types.Message, state: FSMContext
         await db.approve_payout_if_pending(
             req_id,
             credits_to_deduct,
-            group_id=GROUP_ID,
+            group_id=group_id,
             members_to_deduct=required_members,
             hold_hours=hold_hours,
             check_quality=check_quality,
@@ -268,7 +278,7 @@ async def payout_finalize_with_receipt(message: types.Message, state: FSMContext
         info = cast(
             dict[str, Any] | None,
             await db.get_payout_approval_state(
-                req_id, GROUP_ID, hold_hours=hold_hours, check_quality=check_quality
+                req_id, group_id, hold_hours=hold_hours, check_quality=check_quality
             ),
         )
         if not info or info.get("status") != "pending":
@@ -309,7 +319,7 @@ async def payout_finalize_with_receipt(message: types.Message, state: FSMContext
     else:
         await message.answer(
             "✅ Выплата подтверждена.\n"
-            "⚠️ Отчет в группу не отправлен: задайте payment_chat_id (или @channel / -100...) в конфиге.",
+            "⚠️ Отчет в группу не отправлен: задайте чат отчётов в «💰 Финансы» → «🆔 Чат выплат».",
             reply_markup=finance_kb(),
         )
     await state.clear()
