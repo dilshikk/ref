@@ -5,6 +5,7 @@
 import html
 from typing import Any, cast
 from aiogram import Router, types, F
+from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup
 from filters import private_only
 from keyboards.reply_keyboards import stats_kb
@@ -35,7 +36,9 @@ async def _count(sql: str) -> int:
     return int((row or {}).get("count") or 0)
 
 
+# Кнопка «📊 Статистика» и команда /stats из меню админа (utils/bot_commands.py)
 @router.message(F.text == "📊 Статистика", IsBotAdminFilter(ADMINS))
+@router.message(Command("stats"), IsBotAdminFilter(ADMINS))
 async def stats_menu(message: types.Message):
     users = await get_user_totals()
     channels = await get_channel_totals()
