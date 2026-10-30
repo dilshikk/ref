@@ -36,9 +36,7 @@ async def _count(sql: str) -> int:
     return int((row or {}).get("count") or 0)
 
 
-# Кнопка «📊 Статистика» и команда /stats из меню админа (utils/bot_commands.py)
 @router.message(F.text == "📊 Статистика", IsBotAdminFilter(ADMINS))
-@router.message(Command("stats"), IsBotAdminFilter(ADMINS))
 async def stats_menu(message: types.Message):
     users = await get_user_totals()
     channels = await get_channel_totals()
@@ -61,6 +59,13 @@ async def stats_menu(message: types.Message):
         f"Вернувшиеся сегодня: <b>{activity['returning_today']}</b>",
         stats_kb(),
     )
+
+
+# Команда /stats из меню админа (utils/bot_commands.py). Раньше обработчика не было,
+# и команда уходила в fallback («Оставьте свой голос»).
+@router.message(Command("stats"), IsBotAdminFilter(ADMINS))
+async def stats_command(message: types.Message):
+    await stats_menu(message)
 
 
 @router.message(F.text == "👥 Новые пользователи", IsBotAdminFilter(ADMINS))
