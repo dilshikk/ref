@@ -13,6 +13,7 @@ from filters.admin import IsBotAdminFilter, IsMoneyAdmin
 from loader import db, bot
 from states.flows import UserManagementFlow
 from services.audit_log import audit_log_service
+from utils.block_rules import can_block, show_block_button
 from utils.payment_details import mask
 
 router = private_only(Router(name="private.user_management"))
@@ -34,8 +35,10 @@ def profile_text(p) -> str:
     # ломали HTML, и админ не мог открыть профиль (#50)
     username = f"@{html.escape(p['username'])}" if p["username"] else "—"
     created_at = p["created_at"].strftime("%d.%m.%Y %H:%M") if p.get("created_at") else "—"
+    admin_line = "👑 Администратор бота — блокировать нельзя\n" if p["telegram_id"] in ADMINS else ""
     return (
         f"👤 <b>{html.escape(p['full_name'] or '—')}</b>\n"
+        f"{admin_line}"
         f"🆔 ID: <code>{p['telegram_id']}</code>\n"
         f"📎 Username: {username}\n"
         f"💰 Баланс: <b>{balance}</b> сум\n"
@@ -53,21 +56,23 @@ def search_button_text(u) -> str:
 
 
 def profile_kb(telegram_id: int, is_blocked: bool) -> types.InlineKeyboardMarkup:
-    block_btn = (
-        types.InlineKeyboardButton(text="✅ Разблокировать", callback_data=f"umgmt_unblock_{telegram_id}")
-        if is_blocked else
-        types.InlineKeyboardButton(text="🚫 Заблокировать", callback_data=f"umgmt_block_{telegram_id}")
-    )
-    return types.InlineKeyboardMarkup(inline_keyboard=[
+    rows = [
         [types.InlineKeyboardButton(text="📜 История выплат", callback_data=f"umgmt_history_{telegram_id}")],
         [
             types.InlineKeyboardButton(text="➕ Начислить", callback_data=f"umgmt_addbal_{telegram_id}"),
             types.InlineKeyboardButton(text="➖ Обнулить", callback_data=f"umgmt_reset_{telegram_id}"),
         ],
-        [block_btn],
-        [types.InlineKeyboardButton(text="📩 Написать", callback_data=f"umgmt_msg_{telegram_id}")],
-        [types.InlineKeyboardButton(text="🔙 К списку", callback_data="umgmt_list_0")],
-    ])
+    ]
+    # Админа заблокировать нельзя; «Разблокировать» остаётся, чтобы снять старую блокировку
+    if show_block_button(telegram_id, is_blocked, ADMINS):
+        rows.append([
+            types.InlineKeyboardButton(text="✅ Разблокировать", callback_data=f"umgmt_unblock_{telegram_id}")
+            if is_blocked else
+            types.InlineKeyboardButton(text="🚫 Заблокировать", callback_data=f"umgmt_block_{telegram_id}")
+        ])
+    rows.append([types.InlineKeyboardButton(text="📩 Написать", callback_data=f"umgmt_msg_{telegram_id}")])
+    rows.append([types.InlineKeyboardButton(text="🔙 К списку", callback_data="umgmt_list_0")])
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def pagination_kb(page: int, total_pages: int) -> types.InlineKeyboardMarkup:
@@ -371,6 +376,11 @@ async def reset_balance_execute(call: types.CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("umgmt_block_"), IsBotAdminFilter(ADMINS))
 async def block_user(call: types.CallbackQuery) -> None:
     telegram_id = int(call.data.split("_")[2])
+    # Кнопка могла остаться в старом сообщении: проверяем и здесь
+    if not can_block(telegram_id, ADMINS):
+        await call.answer("⛔ Администратора бота заблокировать нельзя.", show_alert=True)
+        await show_profile(call, telegram_id)
+        return
     before = await db.select_user(telegram_id=telegram_id)
     await db.block_user(telegram_id)
     await audit_log_service.record_admin_action(
