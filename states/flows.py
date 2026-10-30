@@ -25,6 +25,7 @@ class AdminFlow(StatesGroup):
     payout_receipt_input = State()
     set_tariff_inline_value = State()
     set_referral_value = State()   # #85: инлайн-панель «🎁 Реферальные настройки»
+    set_limit_value = State()      # #92: инлайн-панель «📊 Лимиты»
     set_payment_channel = State()  # #107: публичная ссылка «📢 Чат выплат»
     set_money_admins = State()     # #116: «👑 Денежные админы» (раньше MONEY_ADMINS в .env)
 
