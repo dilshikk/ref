@@ -113,6 +113,8 @@ async def database_connected() -> None:
     await db.create_table_group_member_activity()
     # Настройки бота вместо url.yml и части .env (#113)
     await db.create_table_bot_settings()
+    # Сохранённые реквизиты пользователей: не нужно вводить карту при каждом выводе
+    await db.create_table_saved_payment_details()
     # Состояния форм (переживают перезапуск)
     await fsm_storage.create_table()
 
