@@ -374,8 +374,17 @@ async def money_admins_menu(message: types.Message, state: FSMContext):
     await state.set_state(AdminFlow.set_money_admins)
 
 
+def _money_admins_confirm_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Подтвердить", callback_data="money_admins_confirm"),
+        # «no» обрабатывает admin/menu.py::cancel_edit — форма закрывается
+        InlineKeyboardButton(text="❌ Отмена", callback_data="no"),
+    ]])
+
+
 @forms_router.message(AdminFlow.set_money_admins, IsBotAdminFilter(ADMINS))
 async def update_money_admins(message: types.Message, state: FSMContext):
+    """Шаг 1: разбираем список и просим подтвердить — ошибка здесь лишает доступа к деньгам (#116)."""
     user = message.from_user
     if user is None:
         return
@@ -392,12 +401,44 @@ async def update_money_admins(message: types.Message, state: FSMContext):
             reply_markup=cancel_kb,
         )
         return
-    await _save(user.id, "money_admins", list(ids))
+    await state.update_data(money_admins=list(ids))
+    listed = "\n".join(f"• <code>{a}</code>" + ("" if a in ADMINS else " ⚠️ не в ADMINS") for a in ids)
+    self_note = "" if user.id in ids else "\n\n⚠️ Вас нет в новом списке — вы потеряете доступ к выплатам."
+    await message.answer(
+        f"👑 Новый список денежных админов:\n{listed}{self_note}\n\nСохранить?",
+        parse_mode="HTML",
+        reply_markup=_money_admins_confirm_kb(),
+    )
+
+
+@router.callback_query(F.data == "money_admins_confirm", IsBotAdminFilter(ADMINS))
+async def confirm_money_admins(call: types.CallbackQuery, state: FSMContext):
+    """Шаг 2: сохраняем подтверждённый список."""
+    msg = call.message
+    if msg is None:
+        return
+    await call.answer()
+    data = await state.get_data()
+    ids = [int(a) for a in data.get("money_admins") or []]
+    if await state.get_state() != AdminFlow.set_money_admins.state or not ids:
+        await cast(Any, msg).answer("⚠️ Форма устарела. Откройте «👑 Денежные админы» снова.",
+                                    reply_markup=finance_kb())
+        await state.clear()
+        return
+    if not can_edit_money_admins(call.from_user.id):
+        await cast(Any, msg).answer("🔒 Изменить список может только денежный админ.", reply_markup=finance_kb())
+        await state.clear()
+        return
+    await _save(call.from_user.id, "money_admins", ids)
     not_admins = [a for a in ids if a not in ADMINS]
     warning = (
         f"\n\n⚠️ {', '.join(map(str, not_admins))} нет в ADMINS: они не увидят админ-панель и заявки."
         if not_admins else ""
     )
-    await message.answer("✅ Список обновлён.\n\n" + _money_admins_text() + warning,
-                         parse_mode="HTML", reply_markup=finance_kb())
+    try:
+        await cast(Any, msg).edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await cast(Any, msg).answer("✅ Список обновлён.\n\n" + _money_admins_text() + warning,
+                                parse_mode="HTML", reply_markup=finance_kb())
     await state.clear()

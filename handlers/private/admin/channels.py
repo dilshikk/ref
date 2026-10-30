@@ -53,6 +53,8 @@ async def channels_settings_menu(message: types.Message):
     settings = get_settings()
     await message.answer(
         "⚙️ <b>Настройки группы</b>\n\n"
+        f"🆔 Группа для приглашений: <code>{settings.group_id or 'не задана'}</code>\n"
+        f"📝 Группа логов: <code>{settings.log_group_id or 'не задана'}</code>\n"
         f"👤 Участников для вывода: <b>{settings.group_member_count}</b>\n\n"
         "Выберите, что изменить.",
         parse_mode="HTML",

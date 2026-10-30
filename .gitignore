@@ -24,9 +24,10 @@ logs/
 .ruff_cache/
 .coverage
 htmlcov/
+# Старые файлы настроек со старых серверов (реальные ID и ссылки) — не коммитить
+# и не класть в образ. Нужны только для разового переноса в базу.
 data/url.yml
 config/
-data/.url.yml.*.tmp
 
 # OS
 .DS_Store

@@ -2,14 +2,13 @@
 # Логи:     docker compose logs -f bot
 #
 # Перед первым запуском на сервере:
-#   1) скопируйте .env.example -> .env и data/url.yml.example -> config/url.yml, заполните
-#        mkdir -p config && cp data/url.yml.example config/url.yml
-#   2) дайте пользователю контейнера право записи в ДИРЕКТОРИЮ config (админка сохраняет
-#      тарифы атомарно: пишет временный файл рядом и подменяет url.yml):
-#        sudo chown -R 1000:1000 config
-#   Переезд со старой схемы: mkdir -p config && mv data/url.yml config/url.yml
-#   3) DB_HOST в .env: внутри контейнера "localhost" — это сам контейнер.
+#   1) скопируйте .env.example -> .env и заполните (токен, админы, PostgreSQL, ключ шифрования)
+#   2) DB_HOST в .env: внутри контейнера "localhost" — это сам контейнер.
 #      Если PostgreSQL стоит на этом же сервере, укажите DB_HOST=host.docker.internal
+#   3) после запуска задайте группу, денежных админов, тарифы и каналы в админ-панели (/admin)
+#
+# Все настройки хранятся в базе, отдельных файлов и директорий монтировать не нужно.
+# Переезд со старой версии (config/url.yml) — см. README, раздел «Переезд со старой версии».
 
 services:
   bot:
@@ -18,12 +17,6 @@ services:
     # Автоперезапуск после падения и после перезагрузки сервера
     restart: unless-stopped
     env_file: .env
-    volumes:
-      # Настройки живут на сервере: изменения из админки не теряются при пересборке.
-      # Монтируется директория, а не один файл: иначе атомарная замена (os.replace) невозможна
-      - ./config:/app/config
-    environment:
-      URL_YML_PATH: /app/config/url.yml
     extra_hosts:
       - "host.docker.internal:host-gateway"
     # Без ограничения docker logs со временем заполняют диск

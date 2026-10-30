@@ -1,5 +1,5 @@
 # handlers/private/admin/settings.py
-"""⚙️ Настройки: ссылки и ID группы, участники для вывода, URL голосования.
+"""⚙️ Настройки: ссылка и ID группы, группа логов, участники для вывода, URL голосования.
 Заглушки «🔐 Безопасность» (дубль), «🌍 Локализация», «🤖 Поведение бота» удалены (#89, #91, #93).
 
 Значения хранятся в таблице bot_settings (#113): читаем через get_settings() / get_raw(),
@@ -115,11 +115,11 @@ async def edit_group_id(message: types.Message):
     await message.answer(
         f"🆔 Текущий ID группы:\n<code>{value}</code>\n\nХотите изменить?",
         parse_mode="HTML",
-        reply_markup=action_keyboard("subcr_chat_id"),
+        reply_markup=action_keyboard("group_id"),
     )
 
 
-@router.callback_query(F.data == "yes_subcr_chat_id", IsBotAdminFilter(ADMINS))
+@router.callback_query(F.data == "yes_group_id", IsBotAdminFilter(ADMINS))
 async def confirm_group_id(call: types.CallbackQuery, state: FSMContext):
     msg = call.message
     if msg is None:
@@ -131,10 +131,10 @@ async def confirm_group_id(call: types.CallbackQuery, state: FSMContext):
         "Бот должен быть администратором этой группы.",
         parse_mode="HTML", reply_markup=cancel_kb,
     )
-    await state.set_state(AdminFlow.set_subcr_chat_id)
+    await state.set_state(AdminFlow.set_group_id)
 
 
-@forms_router.message(AdminFlow.set_subcr_chat_id, IsBotAdminFilter(ADMINS))
+@forms_router.message(AdminFlow.set_group_id, IsBotAdminFilter(ADMINS))
 async def update_group_id(message: types.Message, state: FSMContext):
     user = message.from_user
     if user is None:
@@ -230,6 +230,58 @@ async def update_url(message: types.Message, state: FSMContext):
     await _save(user.id, "url", text)
     await message.answer(
         f"✅ URL обновлён: <a href='{text}'>{text}</a>",
+        parse_mode="HTML", reply_markup=group_settings_kb(),
+    )
+    await state.clear()
+
+
+# «📝 Группа логов» — куда бот пересылает действия пользователей (раньше LOG_GROUP_ID в .env, #116)
+@router.message(F.text == "📝 Группа логов", IsBotAdminFilter(ADMINS))
+async def edit_log_group_id(message: types.Message):
+    value = _or_unset(get_settings().log_group_id, "не задана — логи в группу не отправляются")
+    await message.answer(
+        f"📝 Текущая группа логов:\n<code>{value}</code>\n\nХотите изменить?",
+        parse_mode="HTML",
+        reply_markup=action_keyboard("log_group_id"),
+    )
+
+
+@router.callback_query(F.data == "yes_log_group_id", IsBotAdminFilter(ADMINS))
+async def confirm_log_group_id(call: types.CallbackQuery, state: FSMContext):
+    msg = call.message
+    if msg is None:
+        return
+    await cast(Any, msg).answer(
+        "Введите chat_id группы для логов.\n"
+        "Пример: <code>-1001234567890</code>\n\n"
+        "Отправьте <code>-</code>, чтобы отключить логи в группу.\n"
+        "Бот должен быть участником этой группы.",
+        parse_mode="HTML", reply_markup=cancel_kb,
+    )
+    await state.set_state(AdminFlow.set_log_group_id)
+
+
+@forms_router.message(AdminFlow.set_log_group_id, IsBotAdminFilter(ADMINS))
+async def update_log_group_id(message: types.Message, state: FSMContext):
+    user = message.from_user
+    if user is None:
+        return
+    text = (message.text or "").strip()
+    if text == "-":
+        await _save(user.id, "log_group_id", None)
+        await message.answer("✅ Логи в группу отключены.", reply_markup=group_settings_kb())
+        await state.clear()
+        return
+    chat_id = parse_group_chat_id(text)
+    if chat_id is None:
+        await message.answer(
+            "❌ Неверный формат!\nПример: <code>-1001234567890</code> или <code>-</code>, чтобы отключить.",
+            parse_mode="HTML",
+        )
+        return
+    await _save(user.id, "log_group_id", chat_id)
+    await message.answer(
+        f"✅ Группа логов обновлена: <code>{chat_id}</code>",
         parse_mode="HTML", reply_markup=group_settings_kb(),
     )
     await state.clear()
