@@ -63,7 +63,10 @@ async def users_send_message(message: types.Message, state: FSMContext) -> None:
     await message.answer(f"📨 Отправить сообщение.\n{_ASK_USER}")
 
 
-@router.message(F.text == "🚫 Заблокированные пользователи", IsBotAdminFilter(ADMINS))
+# Старый длинный текст кнопки оставлен: у админов он ещё может быть на клавиатуре
+@router.message(
+    F.text.in_({"🚫 Заблокированные", "🚫 Заблокированные пользователи"}), IsBotAdminFilter(ADMINS)
+)
 async def blocked_users_menu(message: types.Message):
     # #78: список с переходом в профиль, а не только число
     await message.answer(
