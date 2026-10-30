@@ -52,14 +52,21 @@ def setup_middlewares(dispatcher: Dispatcher) -> None:
     from middlewares.subscription import SubscriptionMiddleware
     from middlewares.text_input import TextInputGuardMiddleware
     from middlewares.group_activity import GroupActivityMiddleware
+    from middlewares.profile_sync import ProfileSyncMiddleware
 
     action_logger = ActionLoggerMiddleware()
     blocked_guard = BlockedUserMiddleware()
     subscription_guard = SubscriptionMiddleware()
+    profile_sync = ProfileSyncMiddleware()
 
     # Кто пишет в группу — признак живого участника при проверке «добавил N» (#18).
     # Outer-middleware видит каждое сообщение и не забирает его у обработчиков.
     dispatcher.message.outer_middleware(GroupActivityMiddleware())
+
+    # Сменил имя или username в Telegram — в базе (профиль у админа, поиск) тоже обновится.
+    # Раньше они записывались только при первом /start.
+    dispatcher.message.outer_middleware(profile_sync)
+    dispatcher.callback_query.outer_middleware(profile_sync)
 
     # Блокировка проверяется первой — заблокированный пользователь не доходит до хэндлеров
     dispatcher.message.middleware(blocked_guard)
