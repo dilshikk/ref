@@ -18,6 +18,8 @@ from utils.payment_details import mask
 router = private_only(Router(name="private.user_management"))
 
 PAGE_SIZE = 10
+# Telegram допускает не больше 100 кнопок в инлайн-клавиатуре; длинный список ещё и неудобен
+SEARCH_RESULTS_LIMIT = 20
 
 
 # ======================================================
@@ -42,6 +44,12 @@ def profile_text(p) -> str:
         f"📅 Регистрация: <b>{created_at}</b>\n"
         f"🔒 Статус: {blocked}"
     )
+
+
+def search_button_text(u) -> str:
+    # Без имени раньше выводилось «None (без username)»
+    name = u["full_name"] or f"ID {u['telegram_id']}"
+    return f"{name} (@{u['username']})" if u["username"] else f"{name} (без username)"
 
 
 def profile_kb(telegram_id: int, is_blocked: bool) -> types.InlineKeyboardMarkup:
@@ -150,15 +158,17 @@ async def search_process(message: types.Message, state: FSMContext) -> None:
         return
     purpose = (await state.get_data()).get("search_purpose")
     query = message.text.strip().lstrip("@")
-    await state.clear()
 
     users = await db.search_users(query)
 
+    # Поиск остаётся открытым: следующий текст админа — новый запрос.
+    # Раньше форма закрывалась, и повторный запрос уходил в fallback.
     if not users:
-        await message.answer("❌ Пользователь не найден.")
+        await message.answer("❌ Пользователь не найден. Введите другой запрос:")
         return
 
     if len(users) == 1:
+        await state.clear()
         telegram_id = users[0]["telegram_id"]
         if purpose == "message":
             await _start_send_message(message, state, telegram_id)
@@ -167,17 +177,19 @@ async def search_process(message: types.Message, state: FSMContext) -> None:
             await show_profile(message, telegram_id)
         return
 
+    shown = users[:SEARCH_RESULTS_LIMIT]
     # Для «Отправить сообщение» кнопка сразу открывает ввод текста, иначе — профиль
     prefix = "umgmt_msg_" if purpose == "message" else "umgmt_profile_"
     buttons = [
-        [types.InlineKeyboardButton(
-            text=f"{u['full_name']} (@{u['username']})" if u["username"] else f"{u['full_name']} (без username)",
-            callback_data=f"{prefix}{u['telegram_id']}"
-        )]
-        for u in users
+        [types.InlineKeyboardButton(text=search_button_text(u), callback_data=f"{prefix}{u['telegram_id']}")]
+        for u in shown
     ]
+    more = (
+        f"\nПоказаны первые {len(shown)} — уточните запрос." if len(users) > len(shown) else ""
+    )
     await message.answer(
-        f"🔍 Найдено {len(users)} пользователей. Выберите:",
+        f"🔍 Найдено {len(users)} пользователей. Выберите:{more}\n"
+        "Или введите новый запрос.",
         reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons),
     )
 
@@ -193,8 +205,11 @@ async def profile_by_command(message: types.Message) -> None:
 
 
 @router.callback_query(F.data.startswith("umgmt_profile_"), IsBotAdminFilter(ADMINS))
-async def profile_by_callback(call: types.CallbackQuery) -> None:
+async def profile_by_callback(call: types.CallbackQuery, state: FSMContext) -> None:
     await call.answer()  # ✅
+    # Выбор из результатов поиска закрывает открытый поиск
+    if await state.get_state() == UserManagementFlow.search_input.state:
+        await state.clear()
     telegram_id = int(call.data.split("_")[2])
     await show_profile(call, telegram_id)
 
