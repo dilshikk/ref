@@ -9,7 +9,7 @@ from aiogram.filters import BaseFilter
 from aiogram.types import Message, ChatMemberUpdated
 from loguru import logger
 
-from data.config import ADMINS, GROUP_ID
+from data.config import ADMINS
 from data.settings import get_settings
 from loader import db, bot
 from services.group_adds import qualification_enabled
@@ -28,7 +28,7 @@ _antifraud_alerts: dict[int, tuple[float, int]] = {}
 
 def _referral_hold_hours() -> int:
     """
-    referral_hold_hours в url.yml: если приглашённый вышел из группы в течение
+    referral_hold_hours: если приглашённый вышел из группы в течение
     этого времени после вступления, начисление снимается. 0 — снимать всегда.
     """
     return get_settings().referral_hold_hours
@@ -149,10 +149,17 @@ async def credit_referral(
     referrer_id: int,
     new_user_id: int,
     new_user_name: str = "Пользователь",
-    group_id: int = GROUP_ID,
+    group_id: int | None = None,
 ) -> bool:
     """Засчитывает реферал: проверяет дубли, антифрод, начисляет бонус.
-    Возвращает True, только если реферал действительно засчитан сейчас."""
+    Возвращает True, только если реферал действительно засчитан сейчас.
+    group_id не передан — берём группу из bot_settings (#116)."""
+    if group_id is None:
+        group_id = get_settings().group_id
+    if group_id is None:
+        logger.error(f"Реферал {new_user_id} не засчитан: ID группы не задан в настройках")
+        return False
+
     already_invited = await db.select_invited_members(inveted_user_id=new_user_id)
     if already_invited or await db.has_referral_hold(new_user_id):
         # Сюда же попадает повторное вступление после выхода: деньги второй раз не начисляются
@@ -220,8 +227,8 @@ async def credit_referral(
 
 async def reverse_referral_on_leave(user: types.User, group_id: int) -> None:
     """Пункт 8: приглашённый вышел из группы — снимаем начисление у пригласившего."""
-    # Реферальные ссылки ведут только в GROUP_ID: выход из других групп не учитываем
-    if group_id != GROUP_ID:
+    # Реферальные ссылки ведут только в группу из настроек: выход из других групп не учитываем
+    if group_id != get_settings().group_id:
         return
 
     hold_hours = _referral_hold_hours()

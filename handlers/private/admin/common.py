@@ -2,7 +2,7 @@
 """
 Общее для разделов админки (#37): клавиатура отмены, сводные счётчики,
 запись изменений настроек в аудит.
-Настройки сохраняются через utils.yaml_io.save_url_yaml (атомарная запись, #17).
+Настройки сохраняются через services.settings_store.set_setting в таблицу bot_settings (#115).
 """
 import html
 from typing import Any, cast

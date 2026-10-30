@@ -9,13 +9,13 @@ from typing import Any
 
 from aiogram import types
 
-from data.config import url_yaml
+from data.settings import snapshot
 from utils.payout_report import ChatTarget, build_payout_report_text, resolve_payment_report_target
 
 
 def payment_report_target() -> ChatTarget | None:
-    """Текущий чат отчётов. url_yaml меняется на лету из админки, поэтому читаем при каждом вызове."""
-    return resolve_payment_report_target(url_yaml)
+    """Текущий чат отчётов. Настройки меняются на лету из админки (#113), поэтому читаем при каждом вызове."""
+    return resolve_payment_report_target(snapshot())
 
 
 async def send_payout_report(

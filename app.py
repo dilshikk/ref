@@ -10,6 +10,7 @@ from middlewares.antispam import SmartRateLimiter
 from middlewares.callback_answer import CallbackAutoAnswerMiddleware
 from services.audit_log import audit_log_service
 from services.error_notify import notify_admins_about_error
+from services.settings_store import load_settings, migrate_legacy_settings, setup_problems
 from utils.fsm_storage import PostgresStorage
 from utils.payment_details import EncryptionConfigError, ensure_encryption_configured
 
@@ -96,6 +97,8 @@ async def database_connected() -> None:
     await db.create_table_withdraw_captcha_state()
     await db.create_table_pending_group_adds()
     await db.create_table_group_member_activity()
+    # Настройки бота вместо url.yml и части .env (#113)
+    await db.create_table_bot_settings()
     # Состояния форм (переживают перезапуск)
     await fsm_storage.create_table()
 
@@ -122,7 +125,26 @@ async def database_connected() -> None:
     # Деньги за отклонённых проверкой больше не висят «на проверке» навсегда (#46)
     await db.release_rejected_referral_money()
 
+    # Разовый перенос url.yml и .env в bot_settings, затем загрузка в память (#114).
+    # До подключения обработчиков: они читают настройки через get_settings().
+    await migrate_legacy_settings()
+    await load_settings()
+
     logger.info("✅ Все таблицы проверены и готовы.")
+
+
+async def notify_setup_problems() -> None:
+    """Сообщает админам, каких настроек не хватает для работы бота."""
+    problems = setup_problems()
+    if not problems:
+        return
+    text = "\n\n".join(problems)
+    logger.warning(text)
+    for admin_id in ADMINS:
+        try:
+            await bot.send_message(admin_id, text)
+        except Exception as e:
+            logger.warning(f"Не удалось отправить админу {admin_id} список проблем настройки: {e}")
 
 
 async def aiogram_on_startup_polling(dispatcher: Dispatcher) -> None:
@@ -149,6 +171,7 @@ async def aiogram_on_startup_polling(dispatcher: Dispatcher) -> None:
     # Прерванные рестартом рассылки продолжатся с сохранённого места (#19)
     await start_broadcast_scheduler()
     await on_startup_notify(bot=bot)
+    await notify_setup_problems()
     await set_all_commands(bot=bot, admin_ids=ADMINS)
 
 

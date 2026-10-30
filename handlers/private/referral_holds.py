@@ -13,12 +13,13 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
 from loguru import logger
 
-from data.config import ADMINS, GROUP_ID
+from data.config import ADMINS
 from data.settings import get_settings
 from filters import private_only
 from filters.admin import IsBotAdminFilter, IsMoneyAdmin
 from loader import db
 from services.audit_log import audit_log_service
+from services.settings_store import GROUP_NOT_SET_TEXT
 
 router = private_only(Router(name="private.referral_holds"))
 
@@ -89,8 +90,12 @@ async def approve_holds(call: types.CallbackQuery) -> None:
     if referrer_id is None:
         await call.answer("⚠️ Некорректные данные кнопки.", show_alert=True)
         return
-    price = get_settings().invited_credit
-    result = await db.approve_referral_holds(referrer_id, call.from_user.id, price, GROUP_ID)
+    settings = get_settings()
+    if settings.group_id is None:
+        await call.answer(GROUP_NOT_SET_TEXT, show_alert=True)
+        return
+    price = settings.invited_credit
+    result = await db.approve_referral_holds(referrer_id, call.from_user.id, price, settings.group_id)
     if result["claimed"] == 0:
         await call.answer("⚠️ Уже обработано.", show_alert=True)
         await _drop_buttons(call, "ℹ️ Уже обработано другим админом.")

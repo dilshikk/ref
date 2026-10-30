@@ -24,7 +24,6 @@ from typing import Any
 from aiogram.exceptions import TelegramBadRequest
 from loguru import logger
 
-from data.config import GROUP_ID
 from data.settings import get_settings
 from loader import bot, db
 from utils.account_quality import MemberSignals, evaluate, is_enabled, is_member_status
@@ -59,10 +58,12 @@ def qualification_enabled() -> bool:
 async def unverified_referral_sum(user_id: int) -> int:
     """Сколько сум из баланса пока «на проверке» и не выводится (#46)."""
     settings = get_settings()
+    # Группа из bot_settings (#116). Пока она не задана, вывод всё равно
+    # заблокирован (проверка нормы и одобрение требуют группу), поэтому 0 безопасен.
     return await db.get_unverified_referral_sum(
         user_id,
         hold_hours=settings.referral_hold_hours,
-        group_id=GROUP_ID,
+        group_id=settings.group_id or 0,
         check_quality=qualification_enabled(),
     )
 

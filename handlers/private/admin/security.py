@@ -12,16 +12,16 @@ from keyboards.reply_keyboards import (
 from keyboards.inline_keyboards.actions import action_keyboard
 from states.flows import AdminFlow
 from filters.admin import IsBotAdminFilter
-from data.config import ADMINS, url_yaml
+from data.config import ADMINS
 from data.settings import get_settings
-from utils.yaml_io import save_url_yaml
+from services.settings_store import set_setting
 
 from .common import blocked_users_text, cancel_kb, forms_router, record_setting_change
 
 router = private_only(Router(name="private.admin.security"))
 
 # Показываем значения через get_settings() — те же, по которым работает бот (#49).
-# url_yaml остаётся только для записи новых значений и для old_value в аудите.
+# Сохраняем через set_setting() в таблицу bot_settings (#115).
 
 
 @router.message(F.text == "🔒 Безопасность", IsBotAdminFilter(ADMINS))
@@ -83,12 +83,11 @@ async def update_antispam_limit(message: types.Message, state: FSMContext):
     if not text.isdigit() or int(text) <= 0:
         await message.answer("❌ Введите целое положительное число!\nПример: <code>50</code>", parse_mode="HTML")
         return
-    old_value = url_yaml.get("antispam_referral_limit")
-    url_yaml["antispam_referral_limit"] = int(text)
-    save_url_yaml()
-    await record_setting_change(user.id, "antispam_referral_limit", old_value, url_yaml["antispam_referral_limit"])
+    new_value = int(text)
+    old_value = await set_setting("antispam_referral_limit", new_value, user.id)
+    await record_setting_change(user.id, "antispam_referral_limit", old_value, new_value)
     await message.answer(
-        f"✅ Лимит антифрода изменён на <b>{url_yaml['antispam_referral_limit']}</b> рефералов/час.",
+        f"✅ Лимит антифрода изменён на <b>{new_value}</b> рефералов/час.",
         parse_mode="HTML", reply_markup=reply_keyboard_for_admin(),
     )
     await state.clear()

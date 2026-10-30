@@ -57,12 +57,43 @@ def test_button_texts_are_not_duplicated_between_sections():
     assert [t for t, c in texts.items() if c > 1] == []
 
 
-def test_settings_are_saved_atomically():
-    # #17: только utils.yaml_io.save_url_yaml, никаких open("w") по url.yml
+def test_settings_are_saved_to_database():
+    # #115: настройки сохраняются только через set_setting() в bot_settings — файлов больше нет
+    assert not (ROOT / "utils" / "yaml_io.py").exists()
     for path in ADMIN_DIR.glob("*.py"):
         src = path.read_text(encoding="utf-8")
         assert "open(" not in src, path.name
         assert "_save_yaml" not in src, path.name
+        assert "save_url_yaml" not in src, path.name
+
+
+# Имена, которые убраны из data/config.py (#113–#116). Импорт любого из них
+# ронял бы бот при запуске (ImportError), а ast-тесты этого не замечали.
+_REMOVED_CONFIG_NAMES = {"url_yaml", "URL_YML_PATH", "GROUP_ID", "LOG_GROUP_ID", "MONEY_ADMIN", "MONEY_ADMINS"}
+_CONFIG_EXPORTS = {"env", "BOT_TOKEN", "ADMINS"}
+
+
+def test_only_existing_names_are_imported_from_config():
+    config = ast.parse((ROOT / "data" / "config.py").read_text(encoding="utf-8"))
+    defined = {
+        t.id
+        for n in config.body
+        if isinstance(n, (ast.Assign, ast.AnnAssign))
+        for t in (n.targets if isinstance(n, ast.Assign) else [n.target])
+        if isinstance(t, ast.Name)
+    }
+    assert _CONFIG_EXPORTS <= defined
+    assert not (_REMOVED_CONFIG_NAMES & defined)
+
+    for path in ROOT.rglob("*.py"):
+        if "tests" in path.parts or ".venv" in path.parts:
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.ImportFrom) and node.module == "data.config":
+                missing = {a.name for a in node.names} - defined
+                assert not missing, f"{path.relative_to(ROOT)}: {sorted(missing)}"
+            if isinstance(node, ast.ImportFrom) and node.module == "utils.yaml_io":
+                raise AssertionError(f"{path.relative_to(ROOT)}: utils.yaml_io удалён")
 
 
 def test_relative_imports_resolve():

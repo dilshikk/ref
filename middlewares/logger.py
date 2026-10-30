@@ -12,7 +12,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, TelegramObject
 from loguru import logger
 
-from data.config import LOG_GROUP_ID
+from data.settings import get_settings
 from services.activity import activity_service
 
 # Состояния, в которых пользователь вводит платёжные данные — их текст не логируем вовсе
@@ -56,11 +56,13 @@ class ActionLoggerMiddleware(BaseMiddleware):
 
     async def _send_log(self, bot: Any, text: str) -> None:
         # В фоне, чтобы отправка лога не задерживала ответ пользователю.
-        # LOG_GROUP_ID необязателен: без него логи в группу не шлём (#51)
-        if LOG_GROUP_ID is None or not self._can_send():
+        # Группа логов необязательна: без неё логи в группу не шлём (#51).
+        # Читаем при каждой отправке — её меняют из админки (#116)
+        log_group_id = get_settings().log_group_id
+        if log_group_id is None or not self._can_send():
             return
         try:
-            await bot.send_message(LOG_GROUP_ID, text, parse_mode="HTML")
+            await bot.send_message(log_group_id, text, parse_mode="HTML")
         except Exception as e:
             logger.debug(f"Не удалось отправить лог в группу: {e}")
 

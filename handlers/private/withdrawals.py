@@ -9,13 +9,15 @@ from aiogram.fsm.context import FSMContext
 from loguru import logger
 
 from filters import private_only
-from data.config import ADMINS, GROUP_ID, MONEY_ADMINS
+from data.config import ADMINS
 from data.settings import get_settings
+from filters.admin import is_money_admin
 from loader import db
 from states.flows import WithdrawalFlow
 from services.activity import activity_service
 from services.audit_log import audit_log_service
 from services.group_adds import locked_explanation, qualification_enabled, qualify_pending, unverified_referral_sum
+from services.settings_store import GROUP_NOT_SET_TEXT
 from utils import captcha, payment_details
 from utils.payout_math import withdrawable
 
@@ -57,8 +59,10 @@ async def _withdrawable_now(user_id: int) -> tuple[int, int, int]:
     (баланс, на проверке, можно вывести) (#46).
     Перед расчётом проверяем добавленных: прошедшие проверку сразу открывают деньги.
     """
+    group_id = get_settings().group_id
     try:
-        await qualify_pending(GROUP_ID, user_id)
+        if group_id is not None:
+            await qualify_pending(group_id, user_id)
     except Exception as e:
         logger.error(f"Ошибка проверки добавленных inviter={user_id}: {e}")
     record = await db.get_user_invited_count(user_id)
@@ -105,7 +109,7 @@ async def _do_withdraw(user_id: int, reply_target: types.Message, state: FSMCont
                 await reply_target.answer("⛔ Ваш аккаунт заблокирован. Вывод недоступен.")
                 return
 
-            # get_settings(): строка "5000" или мусор в url.yml не роняют сравнение (#22)
+            # get_settings(): строка "5000" или мусор в настройках не роняют сравнение (#22)
             settings = get_settings()
             min_balance = settings.min_balance
             max_withdraw = settings.max_withdraw
@@ -267,7 +271,7 @@ async def check_captcha(message: types.Message, state: FSMContext) -> None:
     if settings.group_link.startswith(("http://", "https://", "tg://")):
         rows.append([types.InlineKeyboardButton(text="👥 Перейти в группу", url=settings.group_link)])
     else:
-        logger.warning("url.yml: subcr_channel не задан или не ссылка — кнопка группы скрыта")
+        logger.warning("Ссылка группы (subcr_channel) не задана или не ссылка — кнопка группы скрыта")
     rows.append([types.InlineKeyboardButton(text="✅ Я добавил(а)", callback_data="check_group_members")])
 
     note = ""
@@ -293,10 +297,12 @@ async def check_captcha(message: types.Message, state: FSMContext) -> None:
 async def check_group_members(call: types.CallbackQuery, state: FSMContext) -> None:
     await call.answer()
     user_id = call.from_user.id
-    # Та же группа, в которой бот считает добавленных (GROUP_ID из .env).
-    # Раньше здесь читался subcr_chat_id из url.yml — при расхождении счётчик был всегда 0.
-    group_id = GROUP_ID
+    # Та же группа, в которой бот считает добавленных: «🆔 ID группы» в админке (#116).
     settings = get_settings()
+    group_id = settings.group_id
+    if group_id is None:
+        await call.message.answer(GROUP_NOT_SET_TEXT)
+        return
     required_members = settings.group_member_count
 
     # Сначала засчитываем добавленных, прошедших проверку (#18)
@@ -418,8 +424,8 @@ async def _show_confirm(message: types.Message, state: FSMContext) -> None:
 
 
 def _details_for(admin_id: int, payment_info: str) -> str:
-    """Полные реквизиты нужны только тому, кто платит (MONEY_ADMINS); остальным — маска."""
-    return str(payment_info) if admin_id in MONEY_ADMINS else payment_details.mask(payment_info)
+    """Полные реквизиты нужны только тому, кто платит (денежные админы); остальным — маска."""
+    return str(payment_info) if is_money_admin(admin_id) else payment_details.mask(payment_info)
 
 
 # ======================================================
@@ -465,9 +471,14 @@ async def confirm_withdraw(call: types.CallbackQuery, state: FSMContext) -> None
 
     # Норму «добавил N участников» тоже перепроверяем: форма могла пролежать в FSM
     # до 7 дней, и за это время добавленные могли выйти из группы
-    required_members = get_settings().group_member_count
+    settings = get_settings()
+    required_members = settings.group_member_count
     if required_members > 0:
-        added_row = await db.get_user_add_count(GROUP_ID, user_id)
+        if settings.group_id is None:
+            await call.message.answer(GROUP_NOT_SET_TEXT)
+            await state.clear()
+            return
+        added_row = await db.get_user_add_count(settings.group_id, user_id)
         added = int(added_row["add_user_count"] or 0) if added_row else 0
         if added < required_members:
             await call.message.answer(

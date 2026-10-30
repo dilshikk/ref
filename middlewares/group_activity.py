@@ -13,7 +13,7 @@ from aiogram import BaseMiddleware
 from aiogram.types import Message, TelegramObject
 from loguru import logger
 
-from data.config import GROUP_ID
+from data.settings import get_settings
 from loader import db
 
 # Пишем в БД не чаще раза в 10 минут на участника
@@ -34,12 +34,20 @@ class GroupActivityMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
-        if isinstance(event, Message) and event.chat.id == GROUP_ID and event.chat.type in ("group", "supergroup"):
+        if isinstance(event, Message) and event.chat.type in ("group", "supergroup"):
+            # ID группы читаем при каждом сообщении: его можно сменить в админке (#116)
+            group_id = get_settings().group_id
             user = event.from_user
             now = time.monotonic()
-            if user is not None and not user.is_bot and _should_touch(user.id, now):
+            if (
+                group_id is not None
+                and event.chat.id == group_id
+                and user is not None
+                and not user.is_bot
+                and _should_touch(user.id, now)
+            ):
                 try:
-                    await db.touch_group_activity(GROUP_ID, user.id)
+                    await db.touch_group_activity(group_id, user.id)
                     if len(_last_touch) > _MAX_CACHE_SIZE:
                         _last_touch.clear()
                     _last_touch[user.id] = now

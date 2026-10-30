@@ -1,6 +1,9 @@
 # handlers/private/admin/settings.py
 """⚙️ Настройки: ссылки и ID группы, участники для вывода, URL голосования.
-Заглушки «🔐 Безопасность» (дубль), «🌍 Локализация», «🤖 Поведение бота» удалены (#89, #91, #93)."""
+Заглушки «🔐 Безопасность» (дубль), «🌍 Локализация», «🤖 Поведение бота» удалены (#89, #91, #93).
+
+Значения хранятся в таблице bot_settings (#113): читаем через get_settings() / get_raw(),
+сохраняем через set_setting() — база и копия в памяти обновляются сразу, файлов нет."""
 from typing import Any, cast
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
@@ -12,17 +15,25 @@ from keyboards.reply_keyboards import (
 from keyboards.inline_keyboards.actions import action_keyboard
 from states.flows import AdminFlow
 from filters.admin import IsBotAdminFilter
-from data.config import ADMINS, url_yaml
-from data.settings import get_settings
-from utils.yaml_io import save_url_yaml
+from data.config import ADMINS
+from data.settings import get_settings, parse_group_chat_id
+from services.settings_store import set_setting
 
 from .common import cancel_kb, forms_router, record_setting_change
 
 router = private_only(Router(name="private.admin.settings"))
 
-# Числовые настройки показываем через get_settings() — те же значения, по которым
-# работает бот (#49). url_yaml остаётся для записи и для текстовых полей.
 # После сохранения возвращаем меню настроек группы, а не главное меню.
+
+
+def _or_unset(value: Any, unset: str) -> Any:
+    return value if value not in (None, "") else unset
+
+
+async def _save(user_id: int, key: str, value: Any) -> None:
+    """Сохраняет настройку и пишет изменение в журнал."""
+    old_value = await set_setting(key, value, user_id)
+    await record_setting_change(user_id, key, old_value, value)
 
 
 @router.message(F.text == "⚙️ Настройки", IsBotAdminFilter(ADMINS))
@@ -55,7 +66,7 @@ async def settings_limits_menu(message: types.Message):
 
 @router.message(F.text == "🔗 Ссылка группы", IsBotAdminFilter(ADMINS))
 async def edit_subcr_channel(message: types.Message):
-    value = url_yaml.get("subcr_channel", "не задана")
+    value = _or_unset(get_settings().group_link, "не задана")
     await message.answer(
         f"🔗 Текущая ссылка группы:\n<code>{value}</code>\n\nХотите изменить?",
         parse_mode="HTML",
@@ -68,8 +79,9 @@ async def confirm_subcr_channel(call: types.CallbackQuery, state: FSMContext):
     msg = call.message
     if msg is None:
         return
+    value = _or_unset(get_settings().group_link, "не задана")
     await cast(Any, msg).answer(
-        f"Введите новую ссылку группы.\nСейчас: {url_yaml.get('subcr_channel', 'не задана')}\n"
+        f"Введите новую ссылку группы.\nСейчас: {value}\n"
         "Пример: <code>https://t.me/+XXXXXXXXXX</code>",
         parse_mode="HTML", reply_markup=cancel_kb,
     )
@@ -88,10 +100,7 @@ async def update_subcr_channel(message: types.Message, state: FSMContext):
             parse_mode="HTML",
         )
         return
-    old_value = url_yaml.get("subcr_channel", "не задана")
-    url_yaml["subcr_channel"] = text
-    save_url_yaml()
-    await record_setting_change(user.id, "subcr_channel", old_value, url_yaml["subcr_channel"])
+    await _save(user.id, "subcr_channel", text)
     await message.answer(
         f"✅ Ссылка группы обновлена!\n🔗 <a href='{text}'>{text}</a>",
         parse_mode="HTML", reply_markup=group_settings_kb(),
@@ -99,9 +108,10 @@ async def update_subcr_channel(message: types.Message, state: FSMContext):
     await state.clear()
 
 
+# «🆔 ID группы» — группа реферальных ссылок (раньше GROUP_ID в .env, #116)
 @router.message(F.text == "🆔 ID группы", IsBotAdminFilter(ADMINS))
-async def edit_subcr_chat_id(message: types.Message):
-    value = url_yaml.get("subcr_chat_id", "не задан")
+async def edit_group_id(message: types.Message):
+    value = _or_unset(get_settings().group_id, "не задан")
     await message.answer(
         f"🆔 Текущий ID группы:\n<code>{value}</code>\n\nХотите изменить?",
         parse_mode="HTML",
@@ -110,36 +120,35 @@ async def edit_subcr_chat_id(message: types.Message):
 
 
 @router.callback_query(F.data == "yes_subcr_chat_id", IsBotAdminFilter(ADMINS))
-async def confirm_subcr_chat_id(call: types.CallbackQuery, state: FSMContext):
+async def confirm_group_id(call: types.CallbackQuery, state: FSMContext):
     msg = call.message
     if msg is None:
         return
+    value = _or_unset(get_settings().group_id, "не задан")
     await cast(Any, msg).answer(
-        f"Введите новый chat_id группы.\nСейчас: {url_yaml.get('subcr_chat_id', 'не задан')}\n"
-        "Пример: <code>-1001234567890</code>",
+        f"Введите новый chat_id группы.\nСейчас: {value}\n"
+        "Пример: <code>-1001234567890</code>\n\n"
+        "Бот должен быть администратором этой группы.",
         parse_mode="HTML", reply_markup=cancel_kb,
     )
     await state.set_state(AdminFlow.set_subcr_chat_id)
 
 
 @forms_router.message(AdminFlow.set_subcr_chat_id, IsBotAdminFilter(ADMINS))
-async def update_subcr_chat_id(message: types.Message, state: FSMContext):
+async def update_group_id(message: types.Message, state: FSMContext):
     user = message.from_user
     if user is None:
         return
-    text = (message.text or "").strip()
-    if not (text.startswith("-100") and text[1:].isdigit()):
+    chat_id = parse_group_chat_id(message.text or "")
+    if chat_id is None:
         await message.answer(
             "❌ Неверный формат!\nПример: <code>-1001234567890</code>",
             parse_mode="HTML",
         )
         return
-    old_value = url_yaml.get("subcr_chat_id", "не задан")
-    url_yaml["subcr_chat_id"] = int(text)
-    save_url_yaml()
-    await record_setting_change(user.id, "subcr_chat_id", old_value, url_yaml["subcr_chat_id"])
+    await _save(user.id, "group_id", chat_id)
     await message.answer(
-        f"✅ ID группы обновлён: <code>{text}</code>",
+        f"✅ ID группы обновлён: <code>{chat_id}</code>",
         parse_mode="HTML", reply_markup=group_settings_kb(),
     )
     await state.clear()
@@ -177,12 +186,10 @@ async def update_group_member_count(message: types.Message, state: FSMContext):
     if not text.isdigit() or int(text) <= 0:
         await message.answer("❌ Введите целое положительное число!\nПример: <code>5</code>", parse_mode="HTML")
         return
-    old_value = url_yaml.get("group_member_count")
-    url_yaml["group_member_count"] = int(text)
-    save_url_yaml()
-    await record_setting_change(user.id, "group_member_count", old_value, url_yaml["group_member_count"])
+    value = int(text)
+    await _save(user.id, "group_member_count", value)
     await message.answer(
-        f"✅ Кол-во участников для вывода изменено на <b>{url_yaml['group_member_count']}</b>.",
+        f"✅ Кол-во участников для вывода изменено на <b>{value}</b>.",
         parse_mode="HTML", reply_markup=group_settings_kb(),
     )
     await state.clear()
@@ -190,7 +197,7 @@ async def update_group_member_count(message: types.Message, state: FSMContext):
 
 @router.message(F.text == "✏️ Изменить ссылку (URL)", IsBotAdminFilter(ADMINS))
 async def edit_url(message: types.Message):
-    value = url_yaml.get("url", "не задан")
+    value = _or_unset(get_settings().vote_url, "не задан")
     await message.answer(
         f"🌐 Текущая ссылка голосования:\n<code>{value}</code>\n\nХотите изменить?",
         parse_mode="HTML",
@@ -203,8 +210,9 @@ async def confirm_url_edit(call: types.CallbackQuery, state: FSMContext):
     msg = call.message
     if msg is None:
         return
+    value = _or_unset(get_settings().vote_url, "не задан")
     await cast(Any, msg).answer(
-        f"Введите новый URL.\nСейчас: {url_yaml.get('url', 'не задан')}",
+        f"Введите новый URL.\nСейчас: {value}",
         reply_markup=cancel_kb,
     )
     await state.set_state(AdminFlow.set_url)
@@ -219,10 +227,7 @@ async def update_url(message: types.Message, state: FSMContext):
     if not text.startswith("http"):
         await message.answer("❌ Введите корректную ссылку (начиная с http или https):", parse_mode="HTML")
         return
-    old_value = url_yaml.get("url", "")
-    url_yaml["url"] = text
-    save_url_yaml()
-    await record_setting_change(user.id, "url", old_value, url_yaml["url"])
+    await _save(user.id, "url", text)
     await message.answer(
         f"✅ URL обновлён: <a href='{text}'>{text}</a>",
         parse_mode="HTML", reply_markup=group_settings_kb(),

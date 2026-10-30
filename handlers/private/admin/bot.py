@@ -15,9 +15,9 @@ from keyboards.reply_keyboards import (
 from loader import db
 from states.flows import AdminFlow
 from filters.admin import IsBotAdminFilter
-from data.config import ADMINS, url_yaml
-from data.settings import NAME_PLACEHOLDER, TEXT_TEMPLATE_KEYS, get_settings
-from utils.yaml_io import save_url_yaml
+from data.config import ADMINS
+from data.settings import NAME_PLACEHOLDER, TEXT_TEMPLATE_KEYS, get_raw, get_settings
+from services.settings_store import set_setting
 from utils.bot_commands import ADMIN_COMMANDS, USER_COMMANDS, format_commands, set_all_commands
 
 from .common import cancel_kb, forms_router, record_setting_change, short_text
@@ -106,15 +106,16 @@ async def update_text_template(message: types.Message, state: FSMContext):
         )
         return
 
-    templates = cast(dict[str, Any], url_yaml.get("text_templates") or {})
+    # Копия: кэш настроек меняется только через set_setting (#115)
+    stored = get_raw("text_templates")
+    templates: dict[str, Any] = dict(stored) if isinstance(stored, dict) else {}
     old_value = templates.get(key)
     reset = value == _RESET_VALUE
     if reset:
         templates.pop(key, None)
     else:
         templates[key] = value
-    url_yaml["text_templates"] = templates
-    save_url_yaml()
+    await set_setting("text_templates", templates, user.id)
 
     await record_setting_change(
         actor_id=user.id,
@@ -135,7 +136,7 @@ async def update_text_template(message: types.Message, state: FSMContext):
 
 # ─────────────────────────────────────────────
 # 🎁 Реферальные настройки (#85): раньше только показ, теперь инлайн-панель
-# по образцу «💰 Тарифы». Ключи совпадают с полями Settings и ключами url.yml.
+# по образцу «💰 Тарифы». Ключи совпадают с полями Settings и ключами bot_settings.
 # ─────────────────────────────────────────────
 _REFERRAL_FIELDS: dict[str, dict[str, Any]] = {
     "invited_credit": {"label": "Сумма за приглашение", "unit": "сум", "minimum": 0},
@@ -237,9 +238,7 @@ async def ref_value_input(message: types.Message, state: FSMContext):
         return
 
     value = int(raw)
-    old_value = url_yaml.get(key)
-    url_yaml[key] = value
-    save_url_yaml()
+    old_value = await set_setting(key, value, user.id)
     await record_setting_change(user.id, key, old_value, value)
 
     # Обновляем исходную панель, чтобы админ сразу видел новое значение
@@ -319,12 +318,8 @@ async def update_poll_config(message: types.Message, state: FSMContext):
         await message.answer("❌ Нужно минимум 2 варианта ответа.", reply_markup=cancel_kb)
         return
 
-    old_question = url_yaml.get("poll_question")
-    old_options = url_yaml.get("poll_options")
-
-    url_yaml["poll_question"] = question
-    url_yaml["poll_options"] = options
-    save_url_yaml()
+    old_question = await set_setting("poll_question", question, user.id)
+    old_options = await set_setting("poll_options", options, user.id)
 
     await record_setting_change(
         actor_id=user.id,

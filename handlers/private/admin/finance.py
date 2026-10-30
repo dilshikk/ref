@@ -1,10 +1,13 @@
 # handlers/private/admin/finance.py
-"""💰 Финансы и тарифы: суммы вывода, награды, чат отчётов о выплатах.
+"""💰 Финансы и тарифы: суммы вывода, награды, чат отчётов о выплатах, денежные админы.
 Сами выплаты (одобрение/отклонение) — в handlers/private/payout_guard.py.
 
 Тарифы меняются только в инлайн-панели «💰 Тарифы» (#99). Старые обработчики
 «💸 Мин. сумма вывода», «💰 Макс. сумма вывода», «🎁 Сумма за приглашение»,
-«🗳 Сумма за голос» удалены: их кнопки (tariffs_kb) нигде не показывались."""
+«🗳 Сумма за голос» удалены: их кнопки (tariffs_kb) нигде не показывались.
+
+Настройки хранятся в bot_settings (#113): читаем через get_settings() / get_raw(),
+сохраняем через set_setting()."""
 import html
 from typing import Any, cast
 from aiogram import Router, types, F
@@ -18,11 +21,11 @@ from keyboards.reply_keyboards import (
 from loader import db
 from states.flows import AdminFlow
 from filters.admin import IsBotAdminFilter
-from data.config import ADMINS, url_yaml
-from data.settings import get_settings, is_http_url
+from data.config import ADMINS
+from data.settings import get_raw, get_settings, is_http_url, parse_user_ids
 from services.payouts import payment_report_target
+from services.settings_store import set_setting
 from utils.payout_report import parse_payment_chat_id
-from utils.yaml_io import save_url_yaml
 
 from .common import cancel_kb, forms_router, get_finance_totals, record_setting_change
 
@@ -38,11 +41,16 @@ _TARIFF_FIELDS: dict[str, dict[str, Any]] = {
 }
 
 
+async def _save(user_id: int, key: str, value: Any) -> None:
+    """Сохраняет настройку в базу и пишет изменение в журнал."""
+    old_value = await set_setting(key, value, user_id)
+    await record_setting_change(user_id, key, old_value, value)
+
+
 def _current(key: str) -> int:
     """
-    Текущее значение тарифа так, как его видит бот (#49).
-    Раньше экран показывал сырое url_yaml.get(key, 0): например, «Макс. вывод: 0»,
-    хотя бот без заданного лимита считает 9 999 999, а строку "500" — числом 500.
+    Текущее значение тарифа так, как его видит бот (#49): без заданного лимита
+    бот считает 9 999 999, а строку "500" — числом 500.
     """
     return int(getattr(get_settings(), key))
 
@@ -190,10 +198,7 @@ async def tariff_inline_value_input(message: types.Message, state: FSMContext):
         await message.answer("❌ Значение должно быть больше нуля.", reply_markup=cancel_kb)
         return
 
-    old_value = url_yaml.get(key)
-    url_yaml[key] = value
-    save_url_yaml()
-    await record_setting_change(user.id, key, old_value, value)
+    await _save(user.id, key, value)
 
     panel_chat_id = data.get("tariff_panel_chat_id")
     panel_message_id = data.get("tariff_panel_message_id")
@@ -220,12 +225,16 @@ async def tariff_inline_value_input(message: types.Message, state: FSMContext):
 # ─────────────────────────────────────────────
 # 🆔 Чат выплат: чат отчётов (payment_chat_id) и публичная ссылка (payment_channel, #107)
 # ─────────────────────────────────────────────
+def _payment_chat_id_text() -> str:
+    value = get_raw("payment_chat_id")
+    return str(value) if value not in (None, "") else "не задан"
+
+
 def _payment_chat_text() -> str:
-    chat_id = str(url_yaml.get("payment_chat_id", "не задан"))
     link = get_settings().payment_channel or "не задана"
     return (
         "🆔 <b>Чат выплат</b>\n\n"
-        f"🤖 Чат для отчётов о выплатах (сюда пишет бот):\n<code>{html.escape(chat_id)}</code>\n\n"
+        f"🤖 Чат для отчётов о выплатах (сюда пишет бот):\n<code>{html.escape(_payment_chat_id_text())}</code>\n\n"
         "👥 Публичная ссылка для пользователей (кнопка «📢 Чат выплат»):\n"
         f"{html.escape(link)}\n\n"
         "Что изменить?"
@@ -254,7 +263,7 @@ async def confirm_payment_chat_id(call: types.CallbackQuery, state: FSMContext):
     await call.answer()
     await cast(Any, msg).answer(
         "Введите новый payment_chat_id.\n"
-        f"Сейчас: {html.escape(str(url_yaml.get('payment_chat_id', 'не задан')))}\n"
+        f"Сейчас: {html.escape(_payment_chat_id_text())}\n"
         "Примеры: <code>@my_channel</code> или <code>-1001234567890</code>",
         parse_mode="HTML",
         reply_markup=cancel_kb,
@@ -278,12 +287,9 @@ async def update_payment_chat_id(message: types.Message, state: FSMContext):
         )
         return
 
-    old_value = url_yaml.get("payment_chat_id", "не задан")
-    url_yaml["payment_chat_id"] = parsed
-    save_url_yaml()
-    await record_setting_change(user.id, "payment_chat_id", old_value, url_yaml["payment_chat_id"])
+    await _save(user.id, "payment_chat_id", parsed)
     await message.answer(
-        f"✅ payment_chat_id обновлён: <code>{html.escape(str(url_yaml['payment_chat_id']))}</code>",
+        f"✅ payment_chat_id обновлён: <code>{html.escape(str(parsed))}</code>",
         parse_mode="HTML",
         reply_markup=finance_kb(),
     )
@@ -321,10 +327,77 @@ async def update_payment_channel(message: types.Message, state: FSMContext):
         return
 
     new_value = "" if text == "-" else text
-    old_value = url_yaml.get("payment_channel", "")
-    url_yaml["payment_channel"] = new_value
-    save_url_yaml()
-    await record_setting_change(user.id, "payment_channel", old_value, new_value)
+    await _save(user.id, "payment_channel", new_value)
     result = f"✅ Ссылка обновлена: {html.escape(new_value)}" if new_value else "✅ Ссылка убрана."
     await message.answer(result, parse_mode="HTML", reply_markup=finance_kb())
+    await state.clear()
+
+
+# ─────────────────────────────────────────────
+# 👑 Денежные админы (#116): кто одобряет выплаты и меняет балансы.
+# Раньше задавались только MONEY_ADMIN / MONEY_ADMINS в .env.
+# ─────────────────────────────────────────────
+def can_edit_money_admins(user_id: int) -> bool:
+    """Пока денежных админов нет — назначает любой админ бота.
+    Когда они есть — менять список может только денежный админ:
+    иначе обычный админ мог бы сам дать себе доступ к деньгам."""
+    current = get_settings().money_admins
+    return not current or user_id in current
+
+
+def _money_admins_text() -> str:
+    current = get_settings().money_admins
+    listed = "\n".join(f"• <code>{a}</code>" + ("" if a in ADMINS else " ⚠️ не в ADMINS") for a in current)
+    return (
+        "👑 <b>Денежные админы</b>\n\n"
+        "Они одобряют выплаты и меняют балансы.\n\n"
+        + (listed or "Пока никто не назначен.")
+    )
+
+
+@router.message(F.text == "👑 Денежные админы", IsBotAdminFilter(ADMINS))
+async def money_admins_menu(message: types.Message, state: FSMContext):
+    user = message.from_user
+    if user is None:
+        return
+    if not can_edit_money_admins(user.id):
+        await message.answer(_money_admins_text() + "\n\n🔒 Изменить список может только денежный админ.",
+                             parse_mode="HTML", reply_markup=finance_kb())
+        return
+    await message.answer(
+        _money_admins_text()
+        + "\n\nОтправьте Telegram ID через запятую, чтобы заменить список.\n"
+        "Пример: <code>111111111, 222222222</code>",
+        parse_mode="HTML",
+        reply_markup=cancel_kb,
+    )
+    await state.set_state(AdminFlow.set_money_admins)
+
+
+@forms_router.message(AdminFlow.set_money_admins, IsBotAdminFilter(ADMINS))
+async def update_money_admins(message: types.Message, state: FSMContext):
+    user = message.from_user
+    if user is None:
+        return
+    # Проверяем ещё раз: список мог измениться, пока форма была открыта
+    if not can_edit_money_admins(user.id):
+        await message.answer("🔒 Изменить список может только денежный админ.", reply_markup=finance_kb())
+        await state.clear()
+        return
+    ids = parse_user_ids(message.text or "")
+    if ids is None:
+        await message.answer(
+            "❌ Нужны числовые Telegram ID через запятую.\nПример: <code>111111111, 222222222</code>",
+            parse_mode="HTML",
+            reply_markup=cancel_kb,
+        )
+        return
+    await _save(user.id, "money_admins", list(ids))
+    not_admins = [a for a in ids if a not in ADMINS]
+    warning = (
+        f"\n\n⚠️ {', '.join(map(str, not_admins))} нет в ADMINS: они не увидят админ-панель и заявки."
+        if not_admins else ""
+    )
+    await message.answer("✅ Список обновлён.\n\n" + _money_admins_text() + warning,
+                         parse_mode="HTML", reply_markup=finance_kb())
     await state.clear()
