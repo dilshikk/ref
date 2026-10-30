@@ -11,6 +11,7 @@
 
 Только чтение: ни один обработчик здесь не меняет деньги.
 """
+import html
 from typing import Any, cast
 
 from aiogram import F, Router, types
@@ -280,8 +281,6 @@ async def _bonuses_text() -> str:
     )
     if not rows:
         return head + "\nРучных начислений пока не было. Начислить: профиль пользователя → «➕ Начислить»."
-
-    import html
 
     lines = []
     for r in rows:
