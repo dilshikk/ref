@@ -136,3 +136,53 @@ def test_open_form_drops_unreadable_fields(with_key, monkeypatch):
 
 def test_seal_form_skips_non_strings_and_empty(with_key):
     assert with_key.seal_form({"payment_info": None, "card_holder": ""}) == {"payment_info": None, "card_holder": ""}
+
+
+# ======================================================
+# Сохранённые реквизиты пользователя
+# ======================================================
+def test_open_saved_card_with_holder(with_key):
+    saved = with_key.open_saved("card", with_key.encrypt("4111111111111111"), with_key.encrypt("Ali Valiyev"))
+    assert saved == {"details": "4111111111111111", "holder": "Ali Valiyev"}
+
+
+def test_open_saved_phone_ignores_holder(with_key):
+    saved = with_key.open_saved("phone", with_key.encrypt("+998901234567"), with_key.encrypt("Ali Valiyev"))
+    assert saved == {"details": "+998901234567", "holder": None}
+
+
+@pytest.mark.parametrize(
+    "kind, details",
+    [("card", "4111111111111112"), ("phone", "+79001234567"), ("iban", "4111111111111111"), ("card", "")],
+)
+def test_open_saved_rejects_invalid(with_key, kind, details):
+    # Неверный номер или неизвестный тип не предлагаем — бот попросит ввести заново
+    assert with_key.open_saved(kind, with_key.encrypt(details) if details else details, None) is None
+
+
+def test_open_saved_after_key_change(with_key, monkeypatch):
+    details = with_key.encrypt("4111111111111111")
+    holder = with_key.encrypt("Ali Valiyev")
+    fernet = pytest.importorskip("cryptography.fernet")
+    monkeypatch.setenv("PAYOUT_ENCRYPTION_KEY", fernet.Fernet.generate_key().decode())
+    assert _load().open_saved("card", details, holder) is None
+
+
+def test_open_saved_drops_unreadable_holder(with_key, monkeypatch):
+    other = _load()  # тот же ключ
+    holder = other.encrypt("Ali Valiyev")
+    fernet = pytest.importorskip("cryptography.fernet")
+    monkeypatch.setenv("PAYOUT_ENCRYPTION_KEY", fernet.Fernet.generate_key().decode())
+    fresh = _load()
+    saved = fresh.open_saved("card", fresh.encrypt("4111111111111111"), holder)
+    assert saved == {"details": "4111111111111111", "holder": None}
+
+
+def test_saved_label_masks_number():
+    assert pd.saved_label("4111111111111111", "Ali Valiyev") == "****1111 (Ali Valiyev)"
+    assert pd.saved_label("+998901234567", None) == "****4567"
+
+
+def test_saved_label_shortens_long_name():
+    label = pd.saved_label("4111111111111111", "A" * 50)
+    assert label.endswith("…)") and len(label) < 50
