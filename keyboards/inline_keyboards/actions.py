@@ -5,6 +5,10 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from data.settings import get_settings, is_http_url
 from loader import db
+from utils.boost_link import boost_target
+
+# «✅ Я проголосовал» — проверка буста канала (handlers/private/boosts.py)
+BOOST_CHECK_CALLBACK = "boost_check"
 
 
 # ✅ Универсальная клавиатура подтверждения "Да / Нет"
@@ -14,8 +18,7 @@ def action_keyboard(key: str) -> InlineKeyboardMarkup:
         "min_balance": ("yes_min_balance", "no"),
         "invite_reward": ("yes_invite_reward", "no"),
         "payment_chat_id": ("yes_payment_chat_id", "no"),
-        "vote_reward": ("yes_vote_reward", "no"),
-        "subcr_channel": ("yes_subcr_channel", "no"), 
+        "subcr_channel": ("yes_subcr_channel", "no"),
         "group_id": ("yes_group_id", "no"),
         "log_group_id": ("yes_log_group_id", "no"),
         "group_member_count": ("yes_group_member_count", "no"),
@@ -44,6 +47,18 @@ def url_button() -> Optional[InlineKeyboardMarkup]:
             InlineKeyboardButton(text="🗳 Проголосовать", url=url)
         ]]
     )
+
+
+# 🚀 Голос за канал: ссылка на буст и проверка «Я проголосовал»
+def boost_keyboard() -> Optional[InlineKeyboardMarkup]:
+    url = get_settings().vote_url
+    if not is_http_url(url):
+        return None
+    rows = [[InlineKeyboardButton(text="🚀 Проголосовать за канал", url=url)]]
+    # Проверить голос можно только по ссылке на буст (t.me/boost/...)
+    if boost_target(url) is not None:
+        rows.append([InlineKeyboardButton(text="✅ Я проголосовал", callback_data=BOOST_CHECK_CALLBACK)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def _channel_buttons() -> list[list[InlineKeyboardButton]]:

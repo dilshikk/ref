@@ -3,7 +3,7 @@ from aiogram.client.default import DefaultBotProperties
 from environs import Env
 
 from data.config import BOT_TOKEN
-from utils.db.settings_db import SettingsDatabase
+from utils.db.boost_db import BoostDatabase
 
 
 env = Env()
@@ -14,8 +14,9 @@ env.read_env()
 # ReferralDatabase: атомарные проверки при одобрении выплаты и удержание рефералов;
 # BroadcastDatabase: рассылки с сохранением прогресса, #19;
 # AntifraudDatabase: суточный лимит, капча, проверка добавленных, #18;
-# SettingsDatabase: настройки бота в таблице bot_settings, #113)
-db = SettingsDatabase(
+# SettingsDatabase: настройки бота в таблице bot_settings, #113;
+# BoostDatabase: награда за голос (буст) канала)
+db = BoostDatabase(
     host=env.str("DB_HOST"),
     user=env.str("DB_USER"),
     password=env.str("DB_PASS"),

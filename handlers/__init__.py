@@ -5,6 +5,7 @@ def setup_routers() -> Router:
     from .groups import member_events
     from .private import (
         admin,
+        boosts,
         broadcasts,
         payout_guard,
         referral_holds,
@@ -49,6 +50,9 @@ def setup_routers() -> Router:
         payout_history.router,
         profile_settings.router,
         support.router,
+        # Голос (буст) за канал: кнопка меню и события бустов из канала
+        boosts.router,
+        boosts.event_router,
         member_events.router,
         fallback.router,
     )

@@ -15,7 +15,7 @@ def menu_kb() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="👥 Мои приглашённые"), KeyboardButton(text="💰 Баланс")],
             [KeyboardButton(text="💸 Вывести средства"), KeyboardButton(text="📜 История выплат")],
             [KeyboardButton(text="📞 Поддержка"), KeyboardButton(text="⚙ Настройки")],
-            [KeyboardButton(text="📢 Чат выплат")],
+            [KeyboardButton(text="📢 Чат выплат"), KeyboardButton(text="🚀 Голос за канал")],
             [KeyboardButton(text="🗳 Голосование")],
         ],
         resize_keyboard=True,
