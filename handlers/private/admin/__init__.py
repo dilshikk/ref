@@ -12,7 +12,7 @@
 """
 from aiogram import Router
 
-from . import bot, broadcasts, channels, finance, logs, menu, security, settings, stats, users
+from . import bot, broadcasts, channels, finance, finance_reports, logs, menu, security, settings, stats, users
 from .common import forms_router
 
 router = Router(name="private.admin")
@@ -20,6 +20,8 @@ router.include_routers(
     menu.router,
     stats.router,
     finance.router,
+    # #68, #71, #72: «💳 Балансы», «🎁 Бонусы», «📊 Отчёты»
+    finance_reports.router,
     users.router,
     channels.router,
     bot.router,
