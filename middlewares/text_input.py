@@ -28,6 +28,7 @@ TEXT_ONLY_STATES: frozenset[str] = frozenset(
         AdminFlow.set_group_member_count,
         AdminFlow.set_max_withdraw,
         AdminFlow.set_antispam_limit,
+        AdminFlow.set_money_admins,
         AdminFlow.ask_ad_url,
         AdminFlow.ask_ad_button_text,
         AdminFlow.ask_ad_schedule_at,
