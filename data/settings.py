@@ -11,6 +11,9 @@
 число могло сохраниться строкой ("500"), и тогда сравнение баланса падало.
 Теперь все читают get_settings(): типы и умолчания описаны здесь один раз.
 
+Голос в опросе внутри бота больше не оплачивается (vote_credit убран). Оплачивается
+голос (буст) за канал по ссылке «Проголосовать»: boost_credit и boost_hold_hours.
+
 Модуль не зависит от aiogram, базы и .env — его можно тестировать отдельно.
 """
 import html
@@ -23,7 +26,9 @@ from loguru import logger
 # Умолчания — единственный источник. Деньги по умолчанию не начисляются (0):
 # если цена не задана, лучше не заплатить, чем заплатить не то.
 DEFAULT_INVITED_CREDIT = 0
-DEFAULT_VOTE_CREDIT = 0
+DEFAULT_BOOST_CREDIT = 0
+# Отмена буста в течение этого времени после оплаты снимает начисление (0 — всегда)
+DEFAULT_BOOST_HOLD_HOURS = 72
 DEFAULT_MIN_BALANCE = 0
 # Фактически «без ограничения», пока админ не задал лимит
 DEFAULT_MAX_WITHDRAW = 9_999_999
@@ -50,7 +55,8 @@ NAME_PLACEHOLDER = "{name}"
 # Все ключи, которые бот хранит в bot_settings. Неизвестный ключ админка не сохранит.
 SETTING_KEYS: frozenset[str] = frozenset({
     "invited_credit",
-    "vote_credit",
+    "boost_credit",      # сум за голос (буст) канала, один раз на человека
+    "boost_hold_hours",  # отмена буста в течение N ч. снимает начисление
     "min_balance",
     "max_withdraw",
     "group_member_count",
@@ -62,7 +68,7 @@ SETTING_KEYS: frozenset[str] = frozenset({
     "subcr_channel",     # ссылка на группу
     "payment_channel",   # публичная ссылка на чат выплат
     "payment_chat_id",   # куда бот пишет отчёты о выплатах
-    "url",               # ссылка «Проголосовать»
+    "url",               # ссылка «Проголосовать» (t.me/boost/... — оплачивается)
     "support",
     "poll_question",
     "poll_options",
@@ -99,7 +105,8 @@ def snapshot() -> dict[str, Any]:
 @dataclass(frozen=True)
 class Settings:
     invited_credit: int          # сум за приглашённого
-    vote_credit: int             # сум за голос в опросе
+    boost_credit: int            # сум за голос (буст) канала, один раз на человека
+    boost_hold_hours: int        # отмена буста в течение стольких часов снимает начисление (0 — всегда)
     min_balance: int             # минимальная сумма вывода
     max_withdraw: int            # максимальная сумма одного вывода
     group_member_count: int      # сколько участников нужно добавить перед выводом
@@ -210,7 +217,8 @@ def _text_templates() -> dict[str, str]:
 def get_settings() -> Settings:
     return Settings(
         invited_credit=_int("invited_credit", DEFAULT_INVITED_CREDIT),
-        vote_credit=_int("vote_credit", DEFAULT_VOTE_CREDIT),
+        boost_credit=_int("boost_credit", DEFAULT_BOOST_CREDIT),
+        boost_hold_hours=_int("boost_hold_hours", DEFAULT_BOOST_HOLD_HOURS),
         min_balance=_int("min_balance", DEFAULT_MIN_BALANCE),
         max_withdraw=_int("max_withdraw", DEFAULT_MAX_WITHDRAW, minimum=1),
         group_member_count=_int("group_member_count", DEFAULT_GROUP_MEMBER_COUNT),
