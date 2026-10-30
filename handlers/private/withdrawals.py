@@ -42,6 +42,13 @@ ADMIN_SKIP_MEMBERS_NOTE = "👑 Вы финансовый администрат
 # Вывод на телефон: имя держателя не спрашивается
 NO_HOLDER = "—"
 
+# Подсказки для ввода реквизитов по способу вывода (ключи — payment_details.SAVED_KINDS)
+DETAILS_PROMPTS = {
+    "card": "💳 Введите номер карты (16 цифр):",
+    "phone": "📱 Введите номер телефона (+998XXXXXXXXX или 998XXXXXXXXX):",
+}
+HOLDER_PROMPT = "👤 Введите имя держателя карты (Имя Фамилия):"
+
 
 def _mask_payment_info(value: str | None) -> str:
     """Карта/телефон для журналов: только последние 4 цифры."""
@@ -371,22 +378,146 @@ async def check_group_members(call: types.CallbackQuery, state: FSMContext) -> N
 
 
 # ======================================================
-# 4. Выбор способа вывода
+# 4. Выбор способа вывода → сохранённые реквизиты или ввод
 # ======================================================
+async def _load_saved(user_id: int, kind: str) -> dict[str, str | None] | None:
+    """Сохранённые реквизиты или None. Ошибка базы не ломает вывод: просто спросим реквизиты."""
+    try:
+        row = await db.get_saved_payment_details(user_id, kind)
+    except Exception as e:
+        logger.warning(f"Не удалось прочитать сохранённые реквизиты user={user_id}: {e}")
+        return None
+    if not row:
+        return None
+    return payment_details.open_saved(kind, row.get("details"), row.get("holder"))
+
+
+async def _remember_details(user_id: int, kind: object, details: str, holder: str | None) -> bool:
+    """Запоминаем реквизиты после заявки. Ошибка не отменяет уже созданную заявку."""
+    if kind not in DETAILS_PROMPTS:
+        return False
+    try:
+        await db.save_payment_details(user_id, str(kind), details, holder if kind == "card" else None)
+        return True
+    except Exception as e:
+        logger.warning(f"Не удалось сохранить реквизиты user={user_id}: {e}")
+        return False
+
+
+async def _drop_buttons(call: types.CallbackQuery) -> None:
+    """Убираем кнопки выбора, чтобы их нельзя было нажать повторно."""
+    try:
+        await call.message.edit_reply_markup(reply_markup=None)
+    except Exception as e:
+        logger.debug(f"Не удалось убрать кнопки: {e}")
+
+
+async def _ask_details(target: types.Message, state: FSMContext, kind: str) -> None:
+    await target.answer(DETAILS_PROMPTS[kind])
+    await state.set_state(WithdrawalFlow.CARD_NUMBER)
+
+
+async def _start_details(call: types.CallbackQuery, state: FSMContext, kind: str) -> None:
+    """Если реквизиты этого способа сохранены — предлагаем их, иначе спрашиваем, как раньше."""
+    await state.update_data(withdraw_type=kind)
+    saved = await _load_saved(call.from_user.id, kind)
+    if saved is None or not saved["details"]:
+        await _ask_details(call.message, state, kind)
+        return
+    label = payment_details.saved_label(saved["details"], saved["holder"])
+    markup = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text=f"✅ Использовать {label}", callback_data="saved_use")],
+        [types.InlineKeyboardButton(text="✏️ Ввести новые", callback_data="saved_new")],
+        [types.InlineKeyboardButton(text="🗑 Удалить мои реквизиты", callback_data="saved_delete")],
+    ])
+    await call.message.answer(
+        f"💾 У вас сохранены реквизиты: <b>{html.escape(label)}</b>\nИспользовать их?",
+        parse_mode="HTML",
+        reply_markup=markup,
+    )
+    await state.set_state(WithdrawalFlow.SAVED_CHOICE)
+
+
 @router.callback_query(F.data == "withdraw_card", WithdrawalFlow.METHOD)
 async def withdraw_card(call: types.CallbackQuery, state: FSMContext) -> None:
     await call.answer()
-    await state.update_data(withdraw_type="card")
-    await call.message.answer("💳 Введите номер карты (16 цифр):")
-    await state.set_state(WithdrawalFlow.CARD_NUMBER)
+    await _start_details(call, state, "card")
 
 
 @router.callback_query(F.data == "withdraw_phone", WithdrawalFlow.METHOD)
 async def withdraw_phone(call: types.CallbackQuery, state: FSMContext) -> None:
     await call.answer()
-    await state.update_data(withdraw_type="phone")
-    await call.message.answer("📱 Введите номер телефона (+998XXXXXXXXX или 998XXXXXXXXX):")
-    await state.set_state(WithdrawalFlow.CARD_NUMBER)
+    await _start_details(call, state, "phone")
+
+
+@router.callback_query(F.data == "saved_use", WithdrawalFlow.SAVED_CHOICE)
+async def use_saved_details(call: types.CallbackQuery, state: FSMContext) -> None:
+    await call.answer()
+    await _drop_buttons(call)
+    kind = (await state.get_data()).get("withdraw_type")
+    if kind not in DETAILS_PROMPTS:
+        await state.clear()
+        await call.message.answer("⚠️ Сессия устарела. Начните вывод заново.")
+        return
+
+    # Читаем заново: реквизиты могли удалить, пока сообщение висело
+    saved = await _load_saved(call.from_user.id, kind)
+    if saved is None or not saved["details"]:
+        await call.message.answer("⚠️ Сохранённые реквизиты недоступны. Введите их заново.")
+        await _ask_details(call.message, state, kind)
+        return
+
+    if kind == "card":
+        await state.update_data(payment_info=saved["details"])
+        if not saved["holder"]:
+            # Карта сохранена без имени — спрашиваем только имя
+            await call.message.answer(HOLDER_PROMPT)
+            await state.set_state(WithdrawalFlow.CARD_HOLDER)
+            return
+        await state.update_data(card_holder=saved["holder"])
+    else:
+        await state.update_data(payment_info=saved["details"], card_holder=NO_HOLDER)
+    await _show_confirm(call.message, state)
+
+
+@router.callback_query(F.data == "saved_new", WithdrawalFlow.SAVED_CHOICE)
+async def enter_new_details(call: types.CallbackQuery, state: FSMContext) -> None:
+    await call.answer()
+    await _drop_buttons(call)
+    kind = (await state.get_data()).get("withdraw_type")
+    if kind not in DETAILS_PROMPTS:
+        await state.clear()
+        await call.message.answer("⚠️ Сессия устарела. Начните вывод заново.")
+        return
+    await _ask_details(call.message, state, kind)
+
+
+@router.callback_query(F.data == "saved_delete")
+async def delete_saved_details(call: types.CallbackQuery, state: FSMContext) -> None:
+    """Удаляет все сохранённые реквизиты пользователя (и карту, и телефон)."""
+    await call.answer()
+    await _drop_buttons(call)
+    try:
+        deleted = await db.delete_saved_payment_details(call.from_user.id)
+    except Exception as e:
+        logger.error(f"Не удалось удалить реквизиты user={call.from_user.id}: {e}")
+        await call.message.answer("⚠️ Не удалось удалить реквизиты. Попробуйте чуть позже.")
+        return
+    await call.message.answer(
+        "🗑 Ваши сохранённые реквизиты удалены." if deleted else "ℹ️ Сохранённых реквизитов нет."
+    )
+    await audit_log_service.record_user_action(
+        actor_id=call.from_user.id,
+        action="saved_payment_details_deleted",
+        entity_type="user",
+        entity_id=call.from_user.id,
+        payload={"deleted": deleted},
+    )
+    # Если пользователь был в середине вывода — продолжаем с ввода новых реквизитов
+    if await state.get_state() == WithdrawalFlow.SAVED_CHOICE.state:
+        kind = (await state.get_data()).get("withdraw_type")
+        if kind in DETAILS_PROMPTS:
+            await _ask_details(call.message, state, kind)
 
 
 # ======================================================
@@ -406,7 +537,7 @@ async def get_card_number(message: types.Message, state: FSMContext) -> None:
             )
             return
         await state.update_data(payment_info=card)
-        await message.answer("👤 Введите имя держателя карты (Имя Фамилия):")
+        await message.answer(HOLDER_PROMPT)
         await state.set_state(WithdrawalFlow.CARD_HOLDER)
     else:
         phone = payment_details.normalize_uz_phone(raw)
@@ -520,13 +651,14 @@ async def confirm_withdraw(call: types.CallbackQuery, state: FSMContext) -> None
 
     # Имя держателя сохраняем в заявке: его видно в «💰 Заявки на выплаты».
     # Раньше оно было только в уведомлении админам (#51)
+    holder_to_store = None if card_holder == NO_HOLDER else card_holder
     request_id = await db.add_payout_request(
         user_id=user_id,
         full_name=call.from_user.full_name,
         username=call.from_user.username or "—",
         card_number=payment_info,
         amount=balance,
-        card_holder=None if card_holder == NO_HOLDER else card_holder,
+        card_holder=holder_to_store,
         allow_repeat_today=money_admin,
     )
     if request_id is None:
@@ -535,6 +667,9 @@ async def confirm_withdraw(call: types.CallbackQuery, state: FSMContext) -> None
         await call.message.answer(ADMIN_PENDING_TEXT if money_admin else ALREADY_REQUESTED_TEXT)
         await state.clear()
         return
+
+    # Запоминаем реквизиты только после успешной заявки: в следующий раз их не нужно вводить
+    remembered = await _remember_details(user_id, data.get("withdraw_type"), payment_info, holder_to_store)
 
     # В журнал действий — только последние 4 цифры реквизитов
     await audit_log_service.record_user_action(
@@ -553,8 +688,9 @@ async def confirm_withdraw(call: types.CallbackQuery, state: FSMContext) -> None
         payload={"amount": balance, "request_id": request_id},
     )
 
+    remembered_note = "\n\n💾 Реквизиты сохранены — в следующий раз их не нужно вводить." if remembered else ""
     await call.message.edit_text(
-        "✅ Заявка на вывод отправлена!\nОжидайте ответа администратора.",
+        "✅ Заявка на вывод отправлена!\nОжидайте ответа администратора." + remembered_note,
         parse_mode="HTML",
     )
     await state.clear()

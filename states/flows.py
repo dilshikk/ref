@@ -45,6 +45,7 @@ class WithdrawalFlow(StatesGroup):
     CARD = State()
     CAPTCHA = State()
     METHOD = State()  # выбор способа вывода — только после проверки участников
+    SAVED_CHOICE = State()  # «использовать сохранённые реквизиты» или «ввести новые»
     CARD_NUMBER = State()
     CARD_HOLDER = State()
     END = State()

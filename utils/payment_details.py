@@ -11,6 +11,8 @@
   при старте. Открытый текст разрешён только явным ALLOW_PLAINTEXT_PAYOUTS=1.
 - Формы вывода в fsm_storage (#44): seal_form/open_form шифруют карту и имя
   держателя перед записью в базу и расшифровывают при чтении.
+- Сохранённые реквизиты пользователя: open_saved проверяет запись из базы,
+  saved_label — подпись кнопки «Использовать ****1234 (Имя)».
 """
 from __future__ import annotations
 
@@ -26,6 +28,12 @@ UNREADABLE = "⚠️ не расшифровано"
 
 # Поля формы вывода, которые нельзя хранить в fsm_storage открытым текстом (#44)
 SENSITIVE_FORM_FIELDS: tuple[str, ...] = ("payment_info", "card_holder")
+
+# Какие реквизиты бот запоминает: карта (с именем держателя) и телефон — отдельно
+SAVED_KINDS: tuple[str, ...] = ("card", "phone")
+
+# Подпись кнопки в Telegram ограничена, длинное имя обрезаем
+_LABEL_HOLDER_MAX = 30
 
 KEYGEN_HINT = (
     "Создайте ключ: python -c \"from cryptography.fernet import Fernet; "
@@ -198,3 +206,36 @@ def open_form(data: Mapping[str, Any]) -> dict[str, Any]:
         else:
             opened[field] = plain
     return opened
+
+
+# ======================================================
+# Сохранённые реквизиты пользователя
+# ======================================================
+def open_saved(kind: str, details: str | None, holder: str | None) -> dict[str, str | None] | None:
+    """
+    Расшифровывает сохранённую запись и заново проверяет её.
+    None — запись нельзя предлагать (неизвестный тип, сменился ключ, неверный номер):
+    тогда бот просто попросит ввести реквизиты, как раньше.
+    Имя держателя, которое не удалось расшифровать, отбрасывается — бот спросит его заново.
+    """
+    if kind not in SAVED_KINDS or not details:
+        return None
+    plain = decrypt(details)
+    if plain == UNREADABLE:
+        return None
+    valid = normalize_card(plain) if kind == "card" else normalize_uz_phone(plain)
+    if valid is None:
+        return None
+    holder_plain = decrypt(holder).strip() if holder else ""
+    if holder_plain == UNREADABLE or kind != "card":
+        holder_plain = ""
+    return {"details": valid, "holder": holder_plain or None}
+
+
+def saved_label(details: str, holder: str | None) -> str:
+    """Подпись кнопки: ****1234 (Имя Фамилия). Полный номер в кнопке не показываем."""
+    label = mask(details)
+    if holder:
+        short = holder if len(holder) <= _LABEL_HOLDER_MAX else holder[: _LABEL_HOLDER_MAX - 1] + "…"
+        label += f" ({short})"
+    return label
