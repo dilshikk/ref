@@ -9,9 +9,13 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 
 _BOOST_USERNAME_RE = re.compile(r"^(?:https?://)?(?:t|telegram)\.me/boost/([A-Za-z0-9_]{4,32})/?$", re.IGNORECASE)
 _BOOST_PRIVATE_RE = re.compile(r"^(?:https?://)?(?:t|telegram)\.me/boost/?\?c=(\d+)$", re.IGNORECASE)
+
+# Буст, убранный не раньше чем за час до срока, считаем истёкшим сам (кончился Premium)
+EXPIRY_TOLERANCE_SECONDS = 3600
 
 
 def boost_target(url: str | None) -> str | int | None:
@@ -26,10 +30,33 @@ def boost_target(url: str | None) -> str | int | None:
     return None
 
 
-def is_boost_chat(target: str | int | None, chat_id: int, username: str | None) -> bool:
-    """Событие буста пришло из канала, указанного в ссылке «Проголосовать»?"""
+def is_boost_chat(
+    target: str | int | None,
+    chat_id: int,
+    username: str | None,
+    known_chat_id: int | None = None,
+) -> bool:
+    """
+    Событие буста пришло из канала, указанного в ссылке «Проголосовать»?
+    known_chat_id — ID канала, запомненный при сохранении ссылки: по нему канал
+    узнаётся, даже если у него сменился юзернейм.
+    """
     if target is None:
         return False
     if isinstance(target, int):
         return chat_id == target
+    if known_chat_id is not None and chat_id == known_chat_id:
+        return True
     return bool(username) and target[1:].lower() == str(username).lower()
+
+
+def to_ts(value: datetime | None) -> int | None:
+    """Дата Telegram → секунды Unix (или None)."""
+    return int(value.timestamp()) if value is not None else None
+
+
+def is_natural_expiry(removed_ts: int | None, expires_ts: int | None) -> bool:
+    """Буст убран, потому что истёк сам (закончился Premium), а не отменён человеком?"""
+    if removed_ts is None or expires_ts is None:
+        return False
+    return removed_ts >= expires_ts - EXPIRY_TOLERANCE_SECONDS

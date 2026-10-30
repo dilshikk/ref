@@ -14,11 +14,13 @@ from keyboards.inline_keyboards.actions import BOOST_CHECK_CALLBACK, boost_keybo
 from services.boosts import (
     BoostReward,
     configured_target,
+    handle_removed_boost,
     hold_note,
     is_tracked_chat,
-    reverse_boost,
+    remember_chat_id,
     reward_boost,
 )
+from utils.boost_link import to_ts
 
 router = private_only(Router(name="private.boosts"))
 # События бустов приходят из канала, а не из лички
@@ -67,7 +69,8 @@ async def boost_menu(message: types.Message) -> None:
     await message.answer(
         "🚀 <b>Голос за канал</b>\n\n"
         "1) Нажмите «🚀 Проголосовать за канал» и отдайте голос.\n"
-        "2) Вернитесь и нажмите «✅ Я проголосовал»."
+        "2) Вернитесь и нажмите «✅ Я проголосовал».\n\n"
+        "ℹ️ Голосовать за канал могут только пользователи Telegram Premium."
         f"{reward_line}",
         parse_mode="HTML",
         reply_markup=markup,
@@ -82,24 +85,29 @@ async def boost_check(call: types.CallbackQuery, bot: Bot) -> None:
         await call.answer(_NOT_CONFIGURED, show_alert=True)
         return
     user_id = call.from_user.id
+    # Если ID канала уже известен — проверяем по нему (переживает смену юзернейма)
+    chat_ref = get_settings().boost_chat_id or target
     try:
-        chat = await bot.get_chat(target)
+        chat = await bot.get_chat(chat_ref)
         boosts = await bot.get_user_chat_boosts(chat_id=chat.id, user_id=user_id)
     except Exception as e:
         # Чаще всего: бот не администратор канала
-        logger.warning(f"Не удалось проверить буст user={user_id} в {target}: {e}")
+        logger.warning(f"Не удалось проверить буст user={user_id} в {chat_ref}: {e}")
         await call.answer("⚠️ Не удалось проверить голос. Попробуйте через минуту.", show_alert=True)
         return
+    await remember_chat_id(chat.id)
 
     if not boosts.boosts:
         await call.answer(
-            "Голос пока не найден. Нажмите «🚀 Проголосовать за канал», отдайте голос и вернитесь сюда.",
+            "Голос пока не найден. Нажмите «🚀 Проголосовать за канал», отдайте голос и вернитесь сюда.\n"
+            "Голосовать могут только пользователи Telegram Premium.",
             show_alert=True,
         )
         return
 
+    boost = boosts.boosts[0]
     try:
-        result = await reward_boost(user_id, chat.id, boosts.boosts[0].boost_id)
+        result = await reward_boost(user_id, chat.id, boost.boost_id, to_ts(boost.expiration_date))
     except Exception as e:
         logger.error(f"Ошибка начисления за буст user={user_id}: {e}")
         await call.answer("⚠️ Не удалось начислить награду. Попробуйте позже.", show_alert=True)
@@ -114,13 +122,16 @@ async def boost_check(call: types.CallbackQuery, bot: Bot) -> None:
 async def on_chat_boost(event: types.ChatBoostUpdated, bot: Bot) -> None:
     if not is_tracked_chat(event.chat.id, event.chat.username):
         return
+    await remember_chat_id(event.chat.id)
     # У буста из розыгрыша пользователя может не быть
     user = getattr(event.boost.source, "user", None)
     if user is None or user.is_bot:
         return
 
     try:
-        result = await reward_boost(user.id, event.chat.id, event.boost.boost_id)
+        result = await reward_boost(
+            user.id, event.chat.id, event.boost.boost_id, to_ts(event.boost.expiration_date)
+        )
     except Exception as e:
         logger.error(f"Ошибка начисления за буст user={user.id}: {e}")
         return
@@ -140,12 +151,12 @@ async def on_chat_boost(event: types.ChatBoostUpdated, bot: Bot) -> None:
 @event_router.removed_chat_boost()
 async def on_removed_chat_boost(event: types.ChatBoostRemoved, bot: Bot) -> None:
     try:
-        reversed_row = await reverse_boost(event.chat.id, event.boost_id)
+        reversed_row = await handle_removed_boost(bot, event.chat.id, event.boost_id, to_ts(event.remove_date))
     except Exception as e:
         logger.error(f"Ошибка снятия награды за буст {event.boost_id}: {e}")
         return
     if reversed_row is None:
-        # Не оплачивался, уже снят или отменён позже срока
+        # Не оплачивался, уже снят, отменён позже срока, остались другие бусты или истёк сам
         return
 
     user_id, amount = reversed_row

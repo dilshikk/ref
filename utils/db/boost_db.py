@@ -4,6 +4,10 @@
 Одна запись на человека (UNIQUE user_id): платим один раз за всё время,
 даже если человек убрал буст и поставил снова. При отмене буста в срок
 запись остаётся с reversed_at — повторно деньги не начислятся.
+
+У Premium-пользователя может быть несколько бустов. В записи хранится один из них;
+если его убрали, а другие остались — запись переносится на оставшийся (move_boost_reward).
+expires_ts — когда буст истекает сам: такое истечение начисление не снимает.
 """
 from __future__ import annotations
 
@@ -23,15 +27,20 @@ class BoostDatabase(SettingsDatabase):
                 boost_id     VARCHAR(128) NOT NULL,
                 reward_sum   BIGINT NOT NULL DEFAULT 0,
                 rewarded_at  TIMESTAMP NOT NULL DEFAULT NOW(),
-                reversed_at  TIMESTAMP NULL
+                reversed_at  TIMESTAMP NULL,
+                expires_ts   BIGINT NULL
             );
             """
         )
+        # Таблица могла быть создана предыдущей версией без expires_ts
+        await self.execute("ALTER TABLE boost_rewards ADD COLUMN IF NOT EXISTS expires_ts BIGINT NULL;")
         await self.execute(
             "CREATE INDEX IF NOT EXISTS idx_boost_rewards_boost ON boost_rewards (chat_id, boost_id);"
         )
 
-    async def reward_boost_once(self, user_id: int, chat_id: int, boost_id: str, reward: int):
+    async def reward_boost_once(
+        self, user_id: int, chat_id: int, boost_id: str, reward: int, expires_ts: int | None = None
+    ):
         """
         Атомарно: запись о буст-награде и +reward к балансу и заработку.
         Если человек уже получал награду за буст — ничего не меняет, возвращает None.
@@ -39,8 +48,8 @@ class BoostDatabase(SettingsDatabase):
         return await self.execute(
             """
             WITH ins AS (
-                INSERT INTO boost_rewards (user_id, chat_id, boost_id, reward_sum)
-                VALUES ($1, CAST($2 AS BIGINT), $3, CAST($4 AS BIGINT))
+                INSERT INTO boost_rewards (user_id, chat_id, boost_id, reward_sum, expires_ts)
+                VALUES ($1, CAST($2 AS BIGINT), $3, CAST($4 AS BIGINT), CAST($5 AS BIGINT))
                 ON CONFLICT (user_id) DO NOTHING
                 RETURNING user_id, reward_sum
             ), cnt AS (
@@ -53,7 +62,34 @@ class BoostDatabase(SettingsDatabase):
             )
             SELECT user_id, reward_sum FROM ins
             """,
-            parameters=(user_id, chat_id, str(boost_id), max(0, int(reward))),
+            parameters=(user_id, chat_id, str(boost_id), max(0, int(reward)), expires_ts),
+            fetchone=True,
+        )
+
+    async def get_active_boost_reward(self, chat_id: int, boost_id: str):
+        """Неснятая награда за этот буст: {user_id, reward_sum, expires_ts} или None."""
+        return await self.execute(
+            """
+            SELECT user_id, reward_sum, expires_ts
+            FROM boost_rewards
+            WHERE chat_id = CAST($1 AS BIGINT) AND boost_id = $2 AND reversed_at IS NULL
+            """,
+            parameters=(chat_id, str(boost_id)),
+            fetchone=True,
+        )
+
+    async def move_boost_reward(
+        self, chat_id: int, old_boost_id: str, new_boost_id: str, expires_ts: int | None
+    ):
+        """Человек убрал один буст, но другие остались: запись переходит на оставшийся."""
+        return await self.execute(
+            """
+            UPDATE boost_rewards
+            SET boost_id = $3, expires_ts = CAST($4 AS BIGINT)
+            WHERE chat_id = CAST($1 AS BIGINT) AND boost_id = $2 AND reversed_at IS NULL
+            RETURNING user_id
+            """,
+            parameters=(chat_id, str(old_boost_id), str(new_boost_id), expires_ts),
             fetchone=True,
         )
 
