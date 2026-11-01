@@ -96,7 +96,7 @@ jobs:
           fetch-depth: 0  # нужна вся история, а не только последний коммит
 
       - name: Поиск секретов в истории
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_ENABLE_COMMENTS: false
