@@ -1,15 +1,15 @@
 # Bot framework
-aiogram==3.31.0
+aiogram==3.32.0
 
 # Database
-SQLAlchemy[asyncio]==2.1.6
+SQLAlchemy[asyncio]==2.1.8
 asyncpg==0.32.0
 greenlet==3.5.6
 
 # Config and logging
 environs==15.2.0
 PyYAML==6.0.3
-loguru==0.7.3
+loguru==0.8.0
 
 # Шифрование реквизитов выплат (#20). 44.0.0 имела известные уязвимости (#43)
 cryptography==50.0.2
